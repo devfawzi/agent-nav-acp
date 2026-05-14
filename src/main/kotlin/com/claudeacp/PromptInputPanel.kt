@@ -44,7 +44,10 @@ import javax.swing.border.AbstractBorder
  *  - Paste image (Ctrl/Cmd+V)
  *  - Drag & drop de fichiers
  */
-class PromptInputPanel(private val project: Project) {
+class PromptInputPanel(
+    private val project: Project,
+    private val getMySessionId: () -> String?
+) {
 
     private val log = thisLogger()
     private val acpService = project.getService(ClaudeACPService::class.java)
@@ -67,6 +70,13 @@ class PromptInputPanel(private val project: Project) {
         isFocusPainted = false
     }
 
+    private val agentButton = JButton("Agent ▾").apply {
+        margin = JBUI.insets(2, 6)
+        isFocusPainted = false
+        font = font.deriveFont(Font.PLAIN, 11f)
+        toolTipText = "Switch ACP agent"
+    }
+
     private val sendButton = JButton("➤").apply {
         toolTipText = "Send (Enter — Shift+Enter for new line)"
         margin = JBUI.insets(4, 10)
@@ -80,6 +90,11 @@ class PromptInputPanel(private val project: Project) {
 
     @Volatile
     private var isExecuting = false
+
+    /** Une fois true, le bouton agent affiche un cadenas et ne s'ouvre plus.
+     *  Set par le panel parent au 1er prompt envoyé. */
+    @Volatile
+    private var agentLocked = false
 
     private val attachments = mutableListOf<PromptAttachment>()
 
@@ -120,10 +135,13 @@ class PromptInputPanel(private val project: Project) {
         val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2)).apply {
             background = UIUtil.getPanelBackground()
             add(attachButton)
+            add(agentButton)
             add(modeButton)
             add(modelButton)
             add(effortButton)
         }
+        updateAgentButtonLabel()
+        agentButton.addActionListener { showAgentMenu() }
         val sendPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 0, 2)).apply {
             background = UIUtil.getPanelBackground()
             add(sendButton)
@@ -140,14 +158,17 @@ class PromptInputPanel(private val project: Project) {
         root.add(centerStack, BorderLayout.CENTER)
         root.add(footer, BorderLayout.SOUTH)
 
-        acpService.addSessionConfigListener { updateButtons(it) }
-        updateButtons(acpService.sessionConfig)
-
-        acpService.addExecutingListener { executing ->
-            SwingUtilities.invokeLater { setExecutingState(executing) }
-        }
+        // La config (Model/Mode/Effort) et l'état d'exécution sont push par le panel parent
+        // via refreshConfig() et setExecutingState() — filtrés par sessionId pour éviter le
+        // cross-talk entre chats.
+        updateButtons(ClaudeACPService.SessionConfig())
 
         return root
+    }
+
+    /** Refresh des dropdowns Model/Mode/Effort pour la config courante de notre session. */
+    fun refreshConfig(config: ClaudeACPService.SessionConfig) {
+        updateButtons(config)
     }
 
     fun onSend(handler: (String, List<PromptAttachment>) -> Unit) {
@@ -161,6 +182,12 @@ class PromptInputPanel(private val project: Project) {
     fun setReady(ready: Boolean) {
         sendButton.isEnabled = ready
         textArea.isEnabled = ready
+    }
+
+    /** Verrouille le bouton agent (appelé par le panel parent au 1er prompt envoyé). */
+    fun lockAgent() {
+        agentLocked = true
+        updateAgentButtonLabel()
     }
 
     // ── Key handling ──────────────────────────────────────────────────────────
@@ -597,7 +624,8 @@ class PromptInputPanel(private val project: Project) {
 
     // ── Send / Stop ──────────────────────────────────────────────────────────
 
-    private fun setExecutingState(executing: Boolean) {
+    /** Public : appelé par le panel parent quand un prompt commence/finit pour NOTRE session. */
+    fun setExecutingState(executing: Boolean) {
         isExecuting = executing
         if (executing) {
             sendButton.text = "⏹"
@@ -667,7 +695,7 @@ class PromptInputPanel(private val project: Project) {
             config.models.forEach { opt ->
                 val item = JMenuItem(opt.name + if (opt.id == config.currentModelId) "  ✓" else "")
                 item.toolTipText = opt.description
-                item.addActionListener { acpService.setModel(opt.id) }
+                item.addActionListener { acpService.setModel(opt.id, targetSessionId = getMySessionId()) }
                 menu.add(item)
             }
             menu.show(modelButton, 0, modelButton.height)
@@ -681,7 +709,7 @@ class PromptInputPanel(private val project: Project) {
             config.modes.forEach { opt ->
                 val item = JMenuItem(opt.name + if (opt.id == config.currentModeId) "  ✓" else "")
                 item.toolTipText = opt.description
-                item.addActionListener { acpService.setMode(opt.id) }
+                item.addActionListener { acpService.setMode(opt.id, targetSessionId = getMySessionId()) }
                 menu.add(item)
             }
             menu.show(modeButton, 0, modeButton.height)
@@ -696,11 +724,63 @@ class PromptInputPanel(private val project: Project) {
             effort.options.forEach { opt ->
                 val item = JMenuItem(opt.name + if (opt.id == effort.currentValue) "  ✓" else "")
                 item.toolTipText = opt.description
-                item.addActionListener { acpService.setConfigOption(effort.id, opt.id) }
+                item.addActionListener { acpService.setConfigOption(effort.id, opt.id, targetSessionId = getMySessionId()) }
                 menu.add(item)
             }
             menu.show(effortButton, 0, effortButton.height)
         }
+    }
+
+    private fun updateAgentButtonLabel() {
+        val active = AgentProfilesService.getInstance().getActiveProfile()
+        agentButton.text = if (agentLocked) "🔒 ${active.displayName}" else "${active.displayName} ▾"
+        agentButton.toolTipText = if (agentLocked) {
+            "Agent locked for this conversation. Start a new chat to use another agent."
+        } else {
+            "Switch ACP agent (locks once the conversation starts)"
+        }
+    }
+
+    private fun showAgentMenu() {
+        if (agentLocked) return
+        val service = AgentProfilesService.getInstance()
+        val active = service.getActiveProfile()
+        val menu = JPopupMenu()
+        service.getAllProfiles().forEach { profile ->
+            val label = profile.displayName + if (profile.id == active.id) "  ✓" else ""
+            val item = JMenuItem(label)
+            item.toolTipText = profile.fullCommandLine()
+            item.addActionListener {
+                if (profile.id != active.id) {
+                    // Single-process : switcher d'agent kill le process courant et donc TOUS les
+                    // autres chats qui l'utilisaient. On prévient l'user avant.
+                    if (acpService.state == ClaudeACPService.State.READY ||
+                        acpService.state == ClaudeACPService.State.INITIALIZING ||
+                        acpService.state == ClaudeACPService.State.CREATING_SESSION) {
+                        val choice = com.intellij.openapi.ui.Messages.showYesNoDialog(
+                            "Switching to '${profile.displayName}' will stop the current " +
+                                "'${active.displayName}' process and end all other chats using it.\n\n" +
+                                "Continue?",
+                            "Switch agent",
+                            com.intellij.openapi.ui.Messages.getWarningIcon()
+                        )
+                        if (choice != com.intellij.openapi.ui.Messages.YES) return@addActionListener
+                    }
+                    service.setActiveProfile(profile.id)
+                    updateAgentButtonLabel()
+                    acpService.switchAgent(profile)
+                }
+            }
+            menu.add(item)
+        }
+        menu.addSeparator()
+        val openSettings = JMenuItem("⚙ Manage agents…")
+        openSettings.addActionListener {
+            com.intellij.openapi.options.ShowSettingsUtil.getInstance()
+                .showSettingsDialog(project, AgentSettingsConfigurable::class.java)
+        }
+        menu.add(openSettings)
+        menu.show(agentButton, 0, agentButton.height)
     }
 
     private fun createMenuButton(label: String): JButton {

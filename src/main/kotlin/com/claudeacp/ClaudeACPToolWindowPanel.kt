@@ -19,8 +19,16 @@ class ClaudeACPToolWindowPanel(
 
     private val chatPanel = ChatPanel(project)
     private val pendingPanel = PendingChangesPanel(project)
-    private val inputPanel = PromptInputPanel(project)
     private val pendingService = project.getService(PendingChangesService::class.java)
+
+    /**
+     * sessionId que ce panel "possède". Chaque content de la tool window a son propre sid pour
+     * router correctement les chunks de Claude vers le bon onglet de chat.
+     */
+    @Volatile
+    private var mySessionId: String? = null
+
+    private val inputPanel = PromptInputPanel(project) { mySessionId }
 
     /** Callback set par la factory pour renommer le content (le tab) du tool window. */
     var renameContentCallback: ((String) -> Unit)? = null
@@ -29,17 +37,12 @@ class ClaudeACPToolWindowPanel(
     @Volatile
     private var hasAutoRenamed = false
 
-    /**
-     * sessionId que ce panel "possède". Chaque content de la tool window a son propre sid pour
-     * router correctement les chunks de Claude vers le bon onglet de chat.
-     * - Pour le 1er chat : claim le sessionId du service au moment où il devient READY.
-     * - Pour les chats suivants : set explicitement via setSessionId() après newSession().
-     */
-    @Volatile
-    private var mySessionId: String? = null
-
     fun setSessionId(sid: String) {
         mySessionId = sid
+        // Refresh la config locale pour ce sid
+        ApplicationManager.getApplication().invokeLater {
+            inputPanel.refreshConfig(acpService.getSessionConfig(sid))
+        }
     }
 
     fun getSessionId(): String? = mySessionId
@@ -141,7 +144,10 @@ class ClaudeACPToolWindowPanel(
                 return@onSend
             }
             if (mySessionId == null) {
-                mySessionId = acpService.sessionId
+                // Sécurité : ne devrait plus arriver car Chat 1 claim auto via state listener
+                // et Chat 2+ via la factory. Si on tombe ici, on évite tout fallback global.
+                chatPanel.appendError("No session attached to this chat — try opening a new chat.")
+                return@onSend
             }
             if (!hasAutoRenamed) {
                 hasAutoRenamed = true
@@ -149,6 +155,8 @@ class ClaudeACPToolWindowPanel(
                 renameContentCallback?.invoke(title)
             }
             chatPanel.appendUserMessage(txt)
+            // Une fois la conversation démarrée, on verrouille le choix d'agent pour ce chat.
+            inputPanel.lockAgent()
             // Affiche aussi un petit récap des pièces jointes en dessous (chips)
             if (atts.isNotEmpty()) {
                 val names = atts.joinToString(", ") {
@@ -163,13 +171,45 @@ class ClaudeACPToolWindowPanel(
         }
 
         inputPanel.onCancel {
-            acpService.cancelPrompt()
+            // Cancel uniquement le prompt de NOTRE session, pas celui en cours global.
+            acpService.cancelPrompt(targetSessionId = mySessionId)
         }
 
         return root
     }
 
     private fun wireListeners() {
+        // Au switch d'agent : reset notre sessionId.
+        // Chat 1 → re-claim auto via le state listener ci-dessous.
+        // Chat 2+ → on schedule un newSession dès que le service redevient READY.
+        acpService.addAgentSwitchedListener {
+            mySessionId = null
+            inputPanel.refreshConfig(ClaudeACPService.SessionConfig())
+            if (!isFirstChat) {
+                schedulePostReadyNewSession()
+            }
+        }
+
+        // Pour Chat 1 : claim auto le sessionId initial du service dès qu'il devient READY.
+        // Ça évite que Chat 1 récupère par hasard le sessionId d'un Chat 2 créé entretemps.
+        if (isFirstChat) {
+            val claimListener = object : (ClaudeACPService.State) -> Unit {
+                override fun invoke(s: ClaudeACPService.State) {
+                    if (s == ClaudeACPService.State.READY && mySessionId == null) {
+                        val sid = acpService.sessionId
+                        if (sid != null) {
+                            setSessionId(sid)
+                        }
+                    }
+                }
+            }
+            acpService.addStateListener(claimListener)
+            // Catch-up si déjà READY au moment où on s'abonne
+            if (acpService.state == ClaudeACPService.State.READY && mySessionId == null) {
+                acpService.sessionId?.let { setSessionId(it) }
+            }
+        }
+
         acpService.addStateListener { newState ->
             ApplicationManager.getApplication().invokeLater {
                 statusLabel.text = when (newState) {
@@ -190,7 +230,6 @@ class ClaudeACPToolWindowPanel(
         }
 
         // Les infos/erreurs/stderr globaux ne sont affichés que dans le 1er chat
-        // (les chats suivants ne voient que leurs propres chunks/tools/cards filtrés par sid)
         if (isFirstChat) {
             acpService.addInfoListener { msg ->
                 ApplicationManager.getApplication().invokeLater { chatPanel.appendInfo(msg) }
@@ -202,7 +241,7 @@ class ClaudeACPToolWindowPanel(
                 ApplicationManager.getApplication().invokeLater { chatPanel.appendStderr(msg) }
             }
         }
-        // Filtres par sessionId : chaque panel ne reçoit que les chunks de SA session
+        // Filtres par sessionId STRICT : si mySessionId est null, on n'affiche RIEN.
         acpService.addMessageChunkListener { text, sid ->
             if (matchesMySession(sid)) {
                 ApplicationManager.getApplication().invokeLater { chatPanel.appendAssistantChunk(text) }
@@ -219,6 +258,24 @@ class ClaudeACPToolWindowPanel(
             }
         }
 
+        // Config par sid : refresh des dropdowns Model/Mode/Effort uniquement pour notre session.
+        acpService.addSessionConfigListener { sid, config ->
+            if (sid != null && sid == mySessionId) {
+                ApplicationManager.getApplication().invokeLater {
+                    inputPanel.refreshConfig(config)
+                }
+            }
+        }
+
+        // Executing par sid : le bouton Stop/Send ne change que pour le chat en cours.
+        acpService.addExecutingListener { executing, sid ->
+            if (sid == mySessionId) {
+                ApplicationManager.getApplication().invokeLater {
+                    inputPanel.setExecutingState(executing)
+                }
+            }
+        }
+
         // Card de modification de fichier dans le chat de la session concernée
         pendingService.addAddedListener { change ->
             if (matchesMySession(change.triggeredBySessionId)) {
@@ -227,24 +284,28 @@ class ClaudeACPToolWindowPanel(
         }
     }
 
+    /** Pour Chat 2+ après un switch d'agent : recrée une session quand le service est de nouveau READY. */
+    private fun schedulePostReadyNewSession() {
+        val listener = object : (ClaudeACPService.State) -> Unit {
+            override fun invoke(s: ClaudeACPService.State) {
+                if (s == ClaudeACPService.State.READY) {
+                    acpService.removeStateListener(this)
+                    acpService.newSession { newSid -> setSessionId(newSid) }
+                }
+            }
+        }
+        acpService.addStateListener(listener)
+    }
+
     /** Renommé manuellement par l'utilisateur (action "Rename Chat"). */
     fun renameChat(newName: String) {
         hasAutoRenamed = true // empêche l'auto-rename ultérieur
         renameContentCallback?.invoke(newName)
     }
 
-    /**
-     * Retourne true si ce chunk doit être affiché dans CE panel :
-     * - Le sid du chunk matche notre mySessionId
-     * - OU si mySessionId est null et qu'on est le 1er chat (le claim aura lieu au 1er prompt)
-     */
+    /** Strict : ce panel n'affiche QUE les events de son propre sessionId. */
     private fun matchesMySession(chunkSid: String?): Boolean {
-        val my = mySessionId
-        if (my == null) {
-            // Pas encore claim'd : on accepte les chunks du sessionId initial du service
-            // tant qu'on est le 1er chat (sinon, on filtre tout)
-            return chunkSid != null && chunkSid == acpService.sessionId
-        }
+        val my = mySessionId ?: return false
         return chunkSid == my
     }
 

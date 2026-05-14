@@ -115,6 +115,88 @@ Launches a temporary IntelliJ instance with the plugin loaded. Handy for develop
 
 ---
 
+## 🤝 Multi-agent support
+
+AgentNav ACP works with **any ACP-compatible agent**. Two profiles are bundled out of the box:
+
+| Agent | Default launch command | Auth location |
+|---|---|---|
+| **Claude Code** | `npx --yes @agentclientprotocol/claude-agent-acp` | `~/.claude/` |
+| **OpenCode** ⭐ | `opencode acp` (local) or `npx -y opencode-ai acp` (fallback) | `~/.opencode/` |
+
+### ⭐ Recommended: OpenCode
+
+**OpenCode is the recommended agent** — open-source, supports `/connect` to link your
+GO subscription, faster iteration, and full ACP feature parity.
+
+```bash
+# 1. Install OpenCode globally (the plugin will detect the local binary and use it
+#    directly instead of slow npx)
+npm install -g opencode-ai
+
+# 2. Sign in
+opencode auth login
+
+# 3. (Optional but recommended) Connect to your GO subscription for unlimited usage:
+#    in the OpenCode chat, type:
+/connect
+```
+
+> ⚠️ **IMPORTANT — After installing OpenCode (or any agent)** :
+> open the plugin's **Settings → Tools → AgentNav ACP** and click **"Auto-detect now"**.
+> This refreshes the cached binary path. Without this step the plugin may keep using
+> the npx fallback (or fail to find the binary at all).
+>
+> Same step applies when you install Claude Code, or when you reinstall any agent in
+> a different location (nvm switch, brew upgrade, etc.).
+
+### Installing Claude Code
+
+```bash
+# Linux / macOS / WSL
+curl -fsSL https://claude.ai/install.sh | bash
+
+# Sign in (opens a browser)
+claude
+
+# After install: Settings → Tools → AgentNav ACP → Auto-detect now
+```
+
+### Switching agents
+
+Click the **Agent ▾** button in the prompt bar (next to the `+` attachments button) to
+switch between agents on the fly. Switching:
+
+- Stops the current ACP process
+- Resets the active chat session (a new ACP session will be created when you send your
+  next prompt — the agent doesn't know about the previous one)
+- Starts the new agent
+
+### Adding a custom agent
+
+Any agent that implements the [Agent Client Protocol](https://agentclientprotocol.com/)
+can be added manually:
+
+1. **Settings → Tools → AgentNav ACP**
+2. **Add custom…** in the *Agents* section
+3. Fill in:
+   - **Display name** — shown in the dropdown
+   - **Command** — binary or first word (e.g. `npx`, `opencode`, `/path/to/agent`)
+   - **Args** — comma-separated (e.g. `-y,my-agent-acp` or `acp,--port,0`)
+4. **Test connection** — launches the binary, sends `initialize`, and verifies a
+   valid JSON-RPC response within 15 seconds
+5. **Apply** — the custom agent appears in the dropdown alongside Claude Code and
+   OpenCode
+
+> The plugin doesn't install the agent for you — you're responsible for having the
+> binary on your machine and authenticating it. The plugin only knows how to *launch*
+> ACP-compatible processes.
+
+See [agentclientprotocol.com](https://agentclientprotocol.com/) for the list of
+ACP-compatible agents (Gemini, Codex, Qwen, Hermes, OpenClaw, etc.).
+
+---
+
 ## 🔍 Automatic binary discovery
 
 On startup, the plugin locates `claude` and `npx` **without any required configuration**, in this priority order:

@@ -51,8 +51,20 @@ class ClaudeACPToolWindowFactory : ToolWindowFactory, DumbAware {
 
         if (n > 1) {
             val acpService = project.getService(ClaudeACPService::class.java)
-            acpService.newSession { newSid ->
-                panel.setSessionId(newSid)
+            // Crée la session immédiatement si possible, sinon attend que le service soit READY.
+            if (acpService.state == ClaudeACPService.State.READY ||
+                acpService.state == ClaudeACPService.State.CREATING_SESSION) {
+                acpService.newSession { newSid -> panel.setSessionId(newSid) }
+            } else {
+                val listener = object : (ClaudeACPService.State) -> Unit {
+                    override fun invoke(s: ClaudeACPService.State) {
+                        if (s == ClaudeACPService.State.READY) {
+                            acpService.removeStateListener(this)
+                            acpService.newSession { newSid -> panel.setSessionId(newSid) }
+                        }
+                    }
+                }
+                acpService.addStateListener(listener)
             }
         }
 

@@ -1,75 +1,10 @@
-# ─── Build outputs ────────────────────────────────────────────────────────────
-/build/
-/out/
-/dist/
-*.class
-*.jar
-*.war
-*.nar
-*.ear
-*.zip
-*.tar.gz
-*.rar
-hs_err_pid*
-replay_pid*
-
-# Garde le gradle-wrapper.jar (nécessaire dans le repo pour ./gradlew)
-!gradle/wrapper/gradle-wrapper.jar
-
-# ─── Gradle ───────────────────────────────────────────────────────────────────
-.gradle/
-.kotlin/
-gradle-app.setting
-build-logic/build/
-
-# ─── IntelliJ IDEA / JetBrains IDEs ───────────────────────────────────────────
+.gradle
+build/
 .idea/
 *.iml
-*.iws
-*.ipr
-.idea_modules/
-atlassian-ide-plugin.xml
-
-# ─── IntelliJ Platform Plugin (Gradle plugin 2.x sandbox) ────────────────────
-.intellijPlatform/
-
-# ─── Kotlin ───────────────────────────────────────────────────────────────────
-*.ctxt
-.mtj.tmp/
-
-# ─── OS ───────────────────────────────────────────────────────────────────────
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# ─── Editor temp files ────────────────────────────────────────────────────────
-*.swp
-*.swo
-*~
-
-# ─── Logs ─────────────────────────────────────────────────────────────────────
-*.log
-logs/
-
-# ─── Local config & secrets ──────────────────────────────────────────────────
+out/
+.kotlin/
 local.properties
-.env
-.env.local
-*.secret
-secrets/
-*.pem
-*.key
-token.txt
-*token*
-.npmrc
-
-# ─── Agent / Claude (state local) ────────────────────────────────────────────
-.claude/
-.aider*
-
-# ─── Node (au cas où on ajoute des outils JS) ────────────────────────────────
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.npm/
+gradle-app.setting
+!gradle-wrapper.jar
+.gradletasknamecache

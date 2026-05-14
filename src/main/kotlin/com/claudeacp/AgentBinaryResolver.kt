@@ -30,6 +30,62 @@ object AgentBinaryResolver {
         binaryName = if (isWindows) "npx.cmd" else "npx"
     )
 
+    /** Cherche un binaire `opencode` installé localement (npm install -g, curl install, etc.). */
+    fun resolveOpencode(): String? = resolve(
+        envVar = "OPENCODE_PATH",
+        settingsGetter = { AgentSettings.getInstance().getOpencodePathOrNull() },
+        candidates = opencodeCandidates(),
+        binaryName = if (isWindows) "opencode.cmd" else "opencode"
+    )
+
+    private fun opencodeCandidates(): List<String> {
+        val home = System.getProperty("user.home")
+        val result = mutableListOf(
+            "$home/.opencode/bin/opencode",
+            "$home/.npm-global/bin/opencode",
+            "$home/.local/bin/opencode",
+            "/usr/local/bin/opencode",
+            "/opt/homebrew/bin/opencode",
+            "/usr/bin/opencode"
+        )
+        // nvm
+        val nvmDir = File("$home/.nvm/versions/node")
+        if (nvmDir.isDirectory) {
+            nvmDir.listFiles()
+                ?.sortedByDescending { it.name }
+                ?.forEach { result.add("${it.absolutePath}/bin/opencode") }
+        }
+        // Windows
+        if (isWindows) {
+            System.getenv("APPDATA")?.let { result.add("$it\\npm\\opencode.cmd") }
+        }
+        return result
+    }
+
+    /** Cherche une command dans le PATH (utilisée pour les custom profiles avec command non-absolue). */
+    fun resolveCommandInPath(name: String): String? {
+        // Si c'est un chemin absolu existant
+        val asFile = File(name)
+        if (asFile.isAbsolute && asFile.canExecute()) return asFile.absolutePath
+        return runWhich(name)
+    }
+
+    /**
+     * Résout la command line effective pour un profil donné.
+     * Pour OpenCode : tente le binaire local d'abord (rapide + même auth dans ~/.opencode/),
+     * sinon fallback sur npx.
+     */
+    fun resolveProfileCommand(profile: AgentProfile): Pair<String, List<String>> {
+        return when (profile.id) {
+            "opencode" -> {
+                val local = resolveOpencode()
+                if (local != null) local to listOf("acp")
+                else profile.command to profile.args
+            }
+            else -> profile.command to profile.args
+        }
+    }
+
     private fun resolve(
         envVar: String,
         settingsGetter: () -> String?,

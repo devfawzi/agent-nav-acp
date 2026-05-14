@@ -401,9 +401,10 @@ private class FileChangeCard(
 
     private val service = project.getService(PendingChangesService::class.java)
     private val diffManager = project.getService(DiffViewerManager::class.java)
+    private val cardBg = JBColor(Color(0xeeeeee), Color(0x2a2d31))  // gris discret light/dark
 
     init {
-        background = UIUtil.getTextFieldBackground()
+        background = cardBg
         border = RoundedBorder(JBColor.border(), 8)
         alignmentX = Component.LEFT_ALIGNMENT
 
@@ -460,8 +461,17 @@ private class FileChangeCard(
             freeze("rejected")
         }
 
+        // Auto-freeze quand le change disparaît du service (= Accept All / Reject All globaux)
+        service.addListener {
+            javax.swing.SwingUtilities.invokeLater {
+                if (service.get(change.path) == null && acceptBtn.isEnabled) {
+                    freeze("processed")
+                }
+            }
+        }
+
         val actions = JPanel(FlowLayout(FlowLayout.RIGHT, 4, 0)).apply {
-            background = UIUtil.getTextFieldBackground()
+            background = cardBg
             add(statusLabel)
             add(viewBtn)
             add(acceptBtn)
@@ -469,7 +479,7 @@ private class FileChangeCard(
         }
 
         val main = JPanel(BorderLayout()).apply {
-            background = UIUtil.getTextFieldBackground()
+            background = cardBg
             border = JBUI.Borders.empty(4, 10)
             add(label, BorderLayout.CENTER)
             add(actions, BorderLayout.EAST)
@@ -504,14 +514,16 @@ private class FileChangeCard(
  */
 private class RunCommandBlock(initialCommand: String) : JPanel(BorderLayout()) {
 
+    private val cardBg = JBColor(Color(0xeeeeee), Color(0x2a2d31))
+
     private val commandArea = JTextArea(initialCommand).apply {
         isEditable = false
         isFocusable = true
         lineWrap = true
-        wrapStyleWord = false  // wrap au char (commandes shell, pas du langage naturel)
+        wrapStyleWord = false
         font = Font(Font.MONOSPACED, Font.PLAIN, 12)
         foreground = JBColor.foreground()
-        background = UIUtil.getTextFieldBackground()
+        background = cardBg
         border = null
     }
 
@@ -523,7 +535,7 @@ private class RunCommandBlock(initialCommand: String) : JPanel(BorderLayout()) {
     }
 
     init {
-        background = UIUtil.getTextFieldBackground()
+        background = cardBg
         border = RoundedBorder(JBColor.border(), 8)
         alignmentX = Component.LEFT_ALIGNMENT
 
@@ -533,7 +545,7 @@ private class RunCommandBlock(initialCommand: String) : JPanel(BorderLayout()) {
         }
 
         val main = JPanel(BorderLayout()).apply {
-            background = UIUtil.getTextFieldBackground()
+            background = cardBg
             border = JBUI.Borders.empty(6, 10)
             add(icon, BorderLayout.WEST)
             add(commandArea, BorderLayout.CENTER)

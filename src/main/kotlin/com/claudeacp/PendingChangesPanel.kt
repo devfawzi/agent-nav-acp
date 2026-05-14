@@ -145,13 +145,14 @@ class PendingChangesPanel(private val project: Project) {
     private fun refresh() {
         ApplicationManager.getApplication().invokeLater {
             val all = service.getAll()
-            titleLabel.text = if (all.isEmpty()) "📝 No pending changes" else "📝 ${all.size} pending change${if (all.size > 1) "s" else ""}"
-            reviewAllButton.isEnabled = all.isNotEmpty()
-            acceptAllButton.isEnabled = all.isNotEmpty()
-            rejectAllButton.isEnabled = all.isNotEmpty()
-            if (all.isNotEmpty() && !expanded) {
-                expanded = true
-            }
+            val hasItems = all.isNotEmpty()
+            titleLabel.text = if (!hasItems) "📝 No pending changes"
+            else "📝 ${all.size} pending change${if (all.size > 1) "s" else ""}"
+            // Cache complètement les boutons globaux quand il n'y a rien à reviewer
+            reviewAllButton.isVisible = hasItems
+            acceptAllButton.isVisible = hasItems
+            rejectAllButton.isVisible = hasItems
+            // Pas d'auto-expand : c'est l'utilisateur qui décide de déplier
 
             listPanel.removeAll()
             all.forEach { change ->
@@ -166,7 +167,7 @@ class PendingChangesPanel(private val project: Project) {
 
     private fun createRow(change: PendingChangesService.PendingChange): JPanel {
         val row = JPanel(BorderLayout()).apply {
-            background = UIUtil.getTextFieldBackground()
+            background = JBColor(java.awt.Color(0xeeeeee), java.awt.Color(0x2a2d31))
             border = JBUI.Borders.compound(
                 JBUI.Borders.customLine(JBColor.border(), 1),
                 JBUI.Borders.empty(6, 8)
@@ -194,7 +195,7 @@ class PendingChangesPanel(private val project: Project) {
         }
 
         val actions = JPanel(FlowLayout(FlowLayout.RIGHT, 2, 0)).apply {
-            background = UIUtil.getTextFieldBackground()
+            background = JBColor(java.awt.Color(0xeeeeee), java.awt.Color(0x2a2d31))
             add(JButton("✓").apply {
                 toolTipText = "Accept"
                 margin = JBUI.insets(1, 4)

@@ -18,7 +18,8 @@ class AgentSettings : PersistentStateComponent<AgentSettings.State> {
 
     data class State(
         var claudeCliPath: String = "",
-        var npxPath: String = ""
+        var npxPath: String = "",
+        var opencodePath: String = ""
     )
 
     private var state = State()
@@ -40,8 +41,15 @@ class AgentSettings : PersistentStateComponent<AgentSettings.State> {
             state.npxPath = value
         }
 
+    var opencodePath: String
+        get() = state.opencodePath
+        set(value) {
+            state.opencodePath = value
+        }
+
     fun getClaudeCliPathOrNull(): String? = claudeCliPath.takeIf { it.isNotBlank() }
     fun getNpxPathOrNull(): String? = npxPath.takeIf { it.isNotBlank() }
+    fun getOpencodePathOrNull(): String? = opencodePath.takeIf { it.isNotBlank() }
 
     companion object {
         fun getInstance(): AgentSettings = service()

@@ -33,6 +33,7 @@
         <projectService serviceImplementation="com.claudeacp.PendingChangesService"/>
         <projectService serviceImplementation="com.claudeacp.DiffViewerManager"/>
         <applicationService serviceImplementation="com.claudeacp.AgentSettings"/>
+        <applicationService serviceImplementation="com.claudeacp.AgentProfilesService"/>
 
         <!-- Settings : Tools → AgentNav ACP -->
         <applicationConfigurable

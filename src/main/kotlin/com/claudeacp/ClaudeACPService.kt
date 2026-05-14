@@ -47,13 +47,11 @@ class ClaudeACPService(private val project: Project) {
     var sessionId: String? = null
         private set
 
-    /** Le sessionId du prompt actuellement en cours d'exécution (mis à jour par sendPrompt,
-     *  utilisé pour tagger les pending changes avec la session qui les a déclenchés). */
+    /** Le sessionId du prompt actuellement en cours d'exécution. */
     @Volatile
     var currentExecutingSessionId: String? = null
         private set
 
-    /** true entre l'envoi d'un prompt et la réception de sa response finale. */
     @Volatile
     var isPromptExecuting: Boolean = false
         private set
@@ -61,7 +59,6 @@ class ClaudeACPService(private val project: Project) {
     private val nextRequestId = AtomicLong(1)
     private val pendingRequests = mutableMapOf<Long, (JsonObject) -> Unit>()
 
-    // Listeners (sid? = sessionId du chunk, null si pas attaché à une session spécifique)
     private val messageListeners = mutableListOf<(JsonObject) -> Unit>()
     private val stderrListeners = mutableListOf<(String) -> Unit>()
     private val infoListeners = mutableListOf<(String) -> Unit>()
@@ -70,13 +67,15 @@ class ClaudeACPService(private val project: Project) {
     private val thoughtChunkListeners = mutableListOf<(String, String?) -> Unit>()
     private val toolCallListeners = mutableListOf<(ToolCallInfo) -> Unit>()
     private val stateListeners = mutableListOf<(State) -> Unit>()
-    private val sessionConfigListeners = mutableListOf<(SessionConfig) -> Unit>()
+    private val sessionConfigListeners = mutableListOf<(String?, SessionConfig) -> Unit>()
     private val sessionCreatedListeners = mutableListOf<(String) -> Unit>()
-    private val executingListeners = mutableListOf<(Boolean) -> Unit>()
+    private val executingListeners = mutableListOf<(Boolean, String?) -> Unit>()
 
-    @Volatile
-    var sessionConfig: SessionConfig = SessionConfig()
-        private set
+    /** Config par session (chaque chat a son propre sessionConfig). */
+    private val sessionConfigs = ConcurrentHashMap<String, SessionConfig>()
+
+    fun getSessionConfig(sid: String?): SessionConfig =
+        if (sid != null) sessionConfigs[sid] ?: SessionConfig() else SessionConfig()
 
     data class SelectOption(val id: String, val name: String, val description: String? = null)
 
@@ -97,7 +96,6 @@ class ClaudeACPService(private val project: Project) {
         val currentValue: String? = null
     )
 
-    /** Info enrichie passée aux listeners de tool_call pour permettre un affichage spécialisé. */
     data class ToolCallInfo(
         val toolCallId: String?,
         val title: String,
@@ -108,26 +106,14 @@ class ClaudeACPService(private val project: Project) {
         val sessionId: String?
     )
 
-    // VFS tracking: stocke le contenu BEFORE quand un fichier change pendant un prompt actif
     private val pendingVfsChanges = ConcurrentHashMap<String, String>()
-    // BEFORE capturé en amont via un tool_call ACP (plus précis que VFS pour les nouveaux fichiers)
     private val toolCallPreCapturedBefore = ConcurrentHashMap<String, String>()
-    // Paths affectés par chaque toolCallId — utilisé pour rafraîchir agressivement
-    // les fichiers à plusieurs reprises (workaround pour la limite inotify Linux).
     private val pathsByToolCallId = ConcurrentHashMap<String, MutableSet<String>>()
-    // Auto-open du diff viewer à la 1ère modif d'un prompt (reset au début de chaque prompt)
-    @Volatile
-    private var autoOpenedDiffThisPrompt = false
 
     init {
         subscribeToVfsChanges()
     }
 
-    /**
-     * Filtre les fichiers qu'on track pour le diff :
-     * - Doit être sous project.basePath
-     * - Pas dans des dossiers générés (build/, .gradle/, .idea/, .git/, etc.)
-     */
     private fun shouldTrackFile(path: String): Boolean {
         val basePath = project.basePath ?: return false
         if (!path.startsWith(basePath)) return false
@@ -157,13 +143,13 @@ class ClaudeACPService(private val project: Project) {
                                     if (event.isFromSave) return@forEach
                                     val path = event.file.path
                                     if (!shouldTrackFile(path)) return@forEach
-                                    // Skip si ce change vient d'un reject en cours (revert vers BEFORE)
-                                    if (pending.consumeRejectFlag(path)) {
-                                        log.info("VFS before: skipping reject revert for $path")
-                                        return@forEach
-                                    }
+                                    if (pending.consumeRejectFlag(path)) return@forEach
                                     if (!pendingVfsChanges.containsKey(path)) {
-                                        val before = String(event.file.contentsToByteArray())
+                                        // Préférer le BEFORE pre-capturé via tool_call : OpenCode
+                                        // écrit si vite que le VFS peut déjà avoir rafraîchi son
+                                        // cache au nouveau contenu au moment de ce callback.
+                                        val before = toolCallPreCapturedBefore.remove(path)
+                                            ?: String(event.file.contentsToByteArray())
                                         pendingVfsChanges[path] = before
                                         history.captureFileBefore(path, before)
                                     }
@@ -196,29 +182,23 @@ class ClaudeACPService(private val project: Project) {
                         val path = file.path
                         if (!shouldTrackFile(path)) return@forEach
 
-                        // Cleanup le pre-capture si on avait pré-stocké un before (avant le check reject)
                         val before = pendingVfsChanges.remove(path)
-
-                        // Skip si ce change vient d'un reject (le before() a peut-être déjà consommé,
-                        // mais on re-check au cas où l'event before() n'a pas été reçu)
-                        if (pending.consumeRejectFlag(path)) {
-                            log.info("VFS after: skipping reject revert for $path")
-                            return@forEach
-                        }
-
+                        if (pending.consumeRejectFlag(path)) return@forEach
                         if (before == null) return@forEach
 
                         try {
-                            val after = String(file.contentsToByteArray())
+                            // Lecture directe disque pour bypasser le cache VFS qui peut renvoyer
+                            // du contenu obsolète si l'agent écrit très vite (cas OpenCode).
+                            val after = try {
+                                java.io.File(path).readText(Charsets.UTF_8)
+                            } catch (e: Exception) {
+                                String(file.contentsToByteArray())
+                            }
                             if (before == after) return@forEach
 
                             history.captureFileAfter(path, after)
-                            log.info("VFS after: about to addOrUpdate path=$path before=${before.length}c after=${after.length}c sid=$currentExecutingSessionId")
+                            log.info("VFS after addOrUpdate path=$path before=${before.length}c after=${after.length}c sid=$currentExecutingSessionId profile=${activeProfile.id}")
                             pending.addOrUpdate(path, before, after, file, currentExecutingSessionId)
-                            log.info("VFS after: addOrUpdate done, now calling DiffViewerManager.scheduleRefresh")
-
-                            // Appel direct au cas où le DiffViewerManager ne serait pas
-                            // encore abonné en tant que listener (lazy service).
                             project.getService(DiffViewerManager::class.java).scheduleRefresh()
                         } catch (e: Exception) {
                             log.warn("VFS after capture failed for $path", e)
@@ -229,9 +209,35 @@ class ClaudeACPService(private val project: Project) {
         )
     }
 
+    /** Profile actif. */
+    @Volatile
+    var activeProfile: AgentProfile = AgentProfile.CLAUDE_CODE
+        private set
+
+    fun switchAgent(profile: AgentProfile) {
+        log.info("Switching agent to: ${profile.displayName} (${profile.id})")
+        if (state != State.STOPPED) {
+            stopAgent()
+        }
+        sessionId = null
+        currentExecutingSessionId = null
+        sessionConfigs.clear()
+        pendingRequests.clear()
+        pendingVfsChanges.clear()
+        toolCallPreCapturedBefore.clear()
+        pathsByToolCallId.clear()
+        lineBuffer.clear()
+        setExecuting(false)
+        activeProfile = profile
+        agentSwitchedListeners.forEach { it(profile) }
+        startAgent()
+    }
+
+    private val agentSwitchedListeners = mutableListOf<(AgentProfile) -> Unit>()
+    fun addAgentSwitchedListener(l: (AgentProfile) -> Unit) { agentSwitchedListeners.add(l) }
+
     fun startAgent(): Boolean {
         if (state != State.STOPPED && state != State.ERROR) {
-            log.info("Agent already in state $state")
             return state == State.READY
         }
         setState(State.STARTING)
@@ -239,35 +245,48 @@ class ClaudeACPService(private val project: Project) {
         pendingRequests.clear()
         lineBuffer.clear()
 
-        // Force l'instanciation du DiffViewerManager pour qu'il s'abonne au
-        // PendingChangesService avant le premier `addOrUpdate` (sinon il rate
-        // les notifications du 1er prompt parce qu'il est lazy).
+        activeProfile = AgentProfilesService.getInstance().getActiveProfile()
         project.getService(DiffViewerManager::class.java)
 
         return try {
-            val npxPath = findNpxPath() ?: run {
-                notifyError("Cannot find npx binary. Install Node.js or check nvm.")
-                setState(State.ERROR)
-                return false
-            }
-
-            val command = GeneralCommandLine().apply {
-                exePath = npxPath
-                addParameters("--yes", "@agentclientprotocol/claude-agent-acp")
-                project.basePath?.let { workDirectory = File(it) }
-                withRedirectErrorStream(false)
-                // Add node binary dir to PATH so the child npm process can find node
-                File(npxPath).parentFile?.absolutePath?.let { nodeDir ->
-                    val currentPath = System.getenv("PATH") ?: ""
-                    environment["PATH"] = "$nodeDir:$currentPath"
+            val (resolvedCmd, resolvedArgs) = AgentBinaryResolver.resolveProfileCommand(activeProfile)
+            val exeFile = File(resolvedCmd)
+            val exePath = if (exeFile.isAbsolute && exeFile.canExecute()) {
+                resolvedCmd
+            } else if (resolvedCmd == "npx") {
+                AgentBinaryResolver.resolveNpx() ?: run {
+                    notifyError("Cannot find npx for profile '${activeProfile.displayName}'. Install Node.js.")
+                    setState(State.ERROR)
+                    return false
+                }
+            } else {
+                AgentBinaryResolver.resolveCommandInPath(resolvedCmd) ?: run {
+                    notifyError("Command '$resolvedCmd' not found for profile '${activeProfile.displayName}'.")
+                    setState(State.ERROR)
+                    return false
                 }
             }
 
-            notifyInfo("Starting: ${command.commandLineString}")
+            val command = GeneralCommandLine().apply {
+                this.exePath = exePath
+                addParameters(resolvedArgs)
+                project.basePath?.let { workDirectory = File(it) }
+                withRedirectErrorStream(false)
+                File(exePath).parentFile?.absolutePath?.let { binDir ->
+                    val currentPath = System.getenv("PATH") ?: ""
+                    environment["PATH"] = "$binDir:$currentPath"
+                }
+            }
 
-            processHandler = OSProcessHandler(command)
-            processHandler!!.addProcessListener(object : ProcessAdapter() {
+            log.info("Starting ${activeProfile.displayName}: ${command.commandLineString}")
+
+            val newHandler = OSProcessHandler(command)
+            processHandler = newHandler
+            newHandler.addProcessListener(object : ProcessAdapter() {
                 override fun onTextAvailable(event: ProcessEvent, outputType: Key<*>) {
+                    // Si ce handler n'est plus le courant (ex: après switchAgent qui a killé
+                    // l'ancien process), on ignore son output — il appartient à un agent mort.
+                    if (newHandler !== processHandler) return
                     when (outputType) {
                         ProcessOutputType.STDOUT -> handleStdout(event.text)
                         ProcessOutputType.STDERR -> handleStderr(event.text)
@@ -275,14 +294,18 @@ class ClaudeACPService(private val project: Project) {
                 }
 
                 override fun processTerminated(event: ProcessEvent) {
-                    notifyError("Agent terminated unexpectedly (exit ${event.exitCode})")
+                    // Ignore les callbacks stales (ex: ancien Claude killé par switchAgent
+                    // pendant qu'OpenCode démarre — sinon on écrasait le state à ERROR).
+                    if (newHandler !== processHandler) {
+                        log.info("Ignoring stale processTerminated (exit ${event.exitCode})")
+                        return
+                    }
+                    log.warn("Agent terminated (exit ${event.exitCode})")
                     setState(State.ERROR)
                 }
             })
 
             processHandler!!.startNotify()
-
-            // Step 1 : handshake
             setState(State.INITIALIZING)
             sendInitialize()
             true
@@ -312,9 +335,6 @@ class ClaudeACPService(private val project: Project) {
         claudeConfigDir = "${System.getProperty("user.home")}/.claude".takeIf { File(it).isDirectory }
     )
 
-    /** Délégué à [AgentBinaryResolver] (env var > settings > auto-discover > which). */
-    private fun findNpxPath(): String? = AgentBinaryResolver.resolveNpx()
-
     private fun handleStdout(text: String) {
         lineBuffer.append(text)
         while (lineBuffer.contains('\n')) {
@@ -328,7 +348,8 @@ class ClaudeACPService(private val project: Project) {
                     val json = JsonParser.parseString(line).asJsonObject
                     handleAcpMessage(json)
                 } catch (e: Exception) {
-                    notifyInfo("(non-json stdout) $line")
+                    log.warn("Failed to parse JSON line (len=${line.length}): ${e.message} — line=${line.take(200)}...${line.takeLast(100)}", e)
+                    notifyInfo("(parse-fail) ${line.take(120)}…")
                 }
             } else {
                 notifyInfo("(stdout) $line")
@@ -345,7 +366,6 @@ class ClaudeACPService(private val project: Project) {
     }
 
     private fun handleAcpMessage(json: JsonObject) {
-        // Raw debug listener
         messageListeners.forEach { it(json) }
 
         val method = json.get("method")?.asString
@@ -355,16 +375,10 @@ class ClaudeACPService(private val project: Project) {
         val hasError = json.has("error")
 
         when {
-            // Response to one of our requests
             id != null && method == null && (hasResult || hasError) -> {
                 val handler = pendingRequests.remove(id)
-                if (handler != null) {
-                    handler(json)
-                } else {
-                    log.warn("Unhandled response id=$id")
-                }
+                handler?.invoke(json) ?: log.warn("Unhandled response id=$id")
             }
-            // Request from agent that needs a response (has id + method)
             id != null && method != null -> {
                 when (method) {
                     "fs/write_text_file", "fs/writeTextFile" -> handleFileWrite(json)
@@ -372,12 +386,10 @@ class ClaudeACPService(private val project: Project) {
                     "session/request_permission" -> handlePermissionRequest(json)
                     else -> {
                         log.warn("Unhandled agent request: $method id=$id")
-                        // Reply with null result so agent doesn't hang
                         sendRawMessage("""{"jsonrpc":"2.0","id":$id,"result":null}""")
                     }
                 }
             }
-            // Notification from agent (no id)
             method != null -> {
                 when (method) {
                     "session/update" -> handleSessionUpdate(json)
@@ -394,7 +406,6 @@ class ClaudeACPService(private val project: Project) {
                 notifyError("initialize failed: ${response.get("error")}")
                 setState(State.ERROR)
             } else {
-                log.info("Initialized. Creating session...")
                 setState(State.CREATING_SESSION)
                 sendNewSession()
             }
@@ -421,9 +432,8 @@ class ClaudeACPService(private val project: Project) {
                     setState(State.ERROR)
                 } else {
                     sessionId = sid
-                    parseSessionCapabilities(result)
+                    parseSessionCapabilities(result, sid)
                     setState(State.READY)
-                    log.info("Session ready: $sid")
                     val snapshot = sessionCreatedListeners.toList()
                     snapshot.forEach { it(sid) }
                 }
@@ -437,12 +447,6 @@ class ClaudeACPService(private val project: Project) {
         sendRawMessage(msg)
     }
 
-    /**
-     * Crée une nouvelle session ACP (n'invalide PAS les sessions précédentes côté agent —
-     * l'agent ACP supporte plusieurs sessions concurrentes via leurs sessionId distincts).
-     * Le `sessionId` field du service est mis à jour au sid le plus récent, mais les anciens
-     * restent utilisables explicitement via `sendPrompt(text, sid)`.
-     */
     fun newSession(onCreated: ((String) -> Unit)? = null) {
         if (state != State.READY && state != State.CREATING_SESSION) {
             notifyInfo("Cannot create new session, agent not ready (state=$state)")
@@ -456,7 +460,6 @@ class ClaudeACPService(private val project: Project) {
                 }
             })
         }
-        log.info("Creating new session...")
         sessionId = null
         sendNewSession()
     }
@@ -477,10 +480,8 @@ class ClaudeACPService(private val project: Project) {
 
         val historyService = project.getService(PromptHistoryService::class.java)
         historyService.startPrompt(promptText, sid)
-        // Reset tracking pour ce prompt
         pendingVfsChanges.clear()
         toolCallPreCapturedBefore.clear()
-        autoOpenedDiffThisPrompt = false
         currentExecutingSessionId = sid
         setExecuting(true)
 
@@ -488,13 +489,10 @@ class ClaudeACPService(private val project: Project) {
         pendingRequests[id] = { response ->
             if (response.has("error")) {
                 notifyError("session/prompt failed: ${response.get("error")}")
-            } else {
-                log.info("Prompt completed: ${response.get("result")}")
             }
             setExecuting(false)
         }
 
-        // Construit le tableau `prompt[]` : texte + attachments (resource_link / image)
         val parts = mutableListOf<String>()
         parts.add("""{"type":"text","text":${escapeJson(promptText)}}""")
         for (att in attachments) {
@@ -519,14 +517,8 @@ class ClaudeACPService(private val project: Project) {
         sendRawMessage(msg)
     }
 
-    /**
-     * Annule le prompt en cours via ACP `session/cancel`.
-     * L'agent va terminer la réponse en cours et envoyer la response finale avec stopReason.
-     */
-    fun cancelPrompt() {
-        val sid = currentExecutingSessionId ?: sessionId ?: return
-        log.info("Cancelling prompt for session $sid")
-        // session/cancel est une notification (pas de response attendue)
+    fun cancelPrompt(targetSessionId: String? = null) {
+        val sid = targetSessionId ?: currentExecutingSessionId ?: sessionId ?: return
         val msg = """{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"$sid"}}"""
         sendRawMessage(msg)
     }
@@ -534,17 +526,17 @@ class ClaudeACPService(private val project: Project) {
     private fun setExecuting(value: Boolean) {
         if (isPromptExecuting == value) return
         isPromptExecuting = value
-        executingListeners.forEach { it(value) }
+        val sid = currentExecutingSessionId
+        executingListeners.forEach { it(value, sid) }
     }
 
-    fun addExecutingListener(l: (Boolean) -> Unit) { executingListeners.add(l) }
+    fun addExecutingListener(l: (Boolean, String?) -> Unit) { executingListeners.add(l) }
 
     private fun handlePermissionRequest(json: JsonObject) {
         val id = json.get("id")?.asLong ?: return
         val params = json.getAsJsonObject("params")
         val options = params?.getAsJsonArray("options")
 
-        // Pick first option containing "allow" (any variant), else first
         val chosen = options?.firstOrNull {
             val obj = it.asJsonObject
             val name = (obj.get("name")?.asString ?: "").lowercase()
@@ -579,7 +571,6 @@ class ClaudeACPService(private val project: Project) {
             }
         }
 
-        // Acknowledge the request
         val id = json.get("id")?.takeIf { !it.isJsonNull }?.asLong
         if (id != null) {
             sendRawMessage("""{"jsonrpc":"2.0","id":$id,"result":null}""")
@@ -601,31 +592,25 @@ class ClaudeACPService(private val project: Project) {
         val update = params.getAsJsonObject("update") ?: return
         val type = update.get("sessionUpdate")?.asString ?: return
 
-        log.info("Session update [$type] sid=$sid: $update")
-
         val text = extractTextFromUpdate(update)
 
         when (type) {
             "agent_message_chunk", "agentMessageChunk" -> {
-                if (!text.isNullOrEmpty()) {
-                    messageChunkListeners.forEach { it(text, sid) }
-                }
+                if (!text.isNullOrEmpty()) messageChunkListeners.forEach { it(text, sid) }
             }
             "agent_thought_chunk", "agentThoughtChunk" -> {
-                if (!text.isNullOrEmpty()) {
-                    thoughtChunkListeners.forEach { it(text, sid) }
-                }
+                if (!text.isNullOrEmpty()) thoughtChunkListeners.forEach { it(text, sid) }
             }
             "tool_call", "tool_call_update", "toolCall", "toolCallUpdate" -> {
                 handleToolCall(update, sid)
             }
-            "usage_update", "usageUpdate", "available_commands_update" -> {
-                // silent
-            }
+            "usage_update", "usageUpdate", "available_commands_update" -> {}
             "current_mode_update", "currentModeUpdate" -> {
                 val modeId = update.get("currentModeId")?.asString
                     ?: update.get("modeId")?.asString
-                if (modeId != null) updateSessionConfig { it.copy(currentModeId = modeId) }
+                if (modeId != null && sid != null) {
+                    updateSessionConfig(sid) { it.copy(currentModeId = modeId) }
+                }
             }
             else -> {
                 if (!text.isNullOrEmpty()) {
@@ -635,28 +620,7 @@ class ClaudeACPService(private val project: Project) {
         }
     }
 
-    /**
-     * Traite un tool_call ou tool_call_update ACP.
-     *
-     * Format ACP (reverse-engineered depuis @agentclientprotocol/claude-agent-acp/dist/tools.js,
-     * fonctions toolInfoFromToolUse et toolUpdateFromDiffToolResponse) :
-     * ```
-     * {
-     *   "sessionUpdate": "tool_call" | "tool_call_update",
-     *   "title": "Write file.txt",
-     *   "kind": "edit",
-     *   "content": [{"type": "diff", "path": "/abs/path", "oldText": null|"...", "newText": "..."}],
-     *   "locations": [{"path": "/abs/path"}]
-     * }
-     * ```
-     *
-     * Stratégie : pré-capturer le BEFORE depuis le disque (l'ACP ne nous donne pas le contenu
-     * complet du fichier avant modif — `oldText` est null pour Write et juste la portion remplacée
-     * pour Edit). Le VFS listener déclenche ensuite le DiffViewer quand le fichier change réellement.
-     */
     private fun handleToolCall(update: JsonObject, sid: String? = null) {
-        log.info("Tool call structure: $update")
-
         val toolCallId = update.get("toolCallId")?.asString
         val status = update.get("status")?.asString
 
@@ -672,9 +636,7 @@ class ClaudeACPService(private val project: Project) {
             ?: rawInput?.get("filePath")?.asString
         val command = rawInput?.get("command")?.asString
 
-        // Extract toutes les paths affectées via content[type:"diff"] et locations[].path
         val paths = mutableSetOf<String>()
-
         update.getAsJsonArray("content")?.forEach { item ->
             if (!item.isJsonObject) return@forEach
             val obj = item.asJsonObject
@@ -682,13 +644,11 @@ class ClaudeACPService(private val project: Project) {
                 obj.get("path")?.asString?.let { paths.add(it) }
             }
         }
-
         update.getAsJsonArray("locations")?.forEach { item ->
             if (!item.isJsonObject) return@forEach
             item.asJsonObject.get("path")?.asString?.let { paths.add(it) }
         }
 
-        // Notifier les listeners avec l'info enrichie (path/command/kind/status)
         val info = ToolCallInfo(
             toolCallId = toolCallId,
             title = title,
@@ -702,58 +662,71 @@ class ClaudeACPService(private val project: Project) {
         val genericTitles = setOf("tool", "edit", "write", "read", "bash", "find", "grep")
         val isGenericOnly = title.lowercase() in genericTitles &&
             info.path == null && info.command == null && status != "completed"
-        if (isGenericOnly) {
-            log.info("Tool call generic title skipped: $title")
-        } else {
+        if (!isGenericOnly) {
             toolCallListeners.forEach { it(info) }
         }
 
-        // Mémoriser les paths par toolCallId pour pouvoir les refresh même au tool_call_update
-        // status=completed qui n'a pas de content/locations.
         if (toolCallId != null && paths.isNotEmpty()) {
             pathsByToolCallId.getOrPut(toolCallId) { mutableSetOf() }.addAll(paths)
         }
 
-        // Tous les paths à refresh (cet update + mémorisés pour ce toolCallId)
         val allPaths = paths.toMutableSet()
         if (toolCallId != null) {
             pathsByToolCallId[toolCallId]?.let { allPaths.addAll(it) }
         }
-
         if (allPaths.isEmpty()) return
 
-        // Pré-capture BEFORE depuis le disque avant que l'agent n'écrive.
         for (path in allPaths) {
             if (!shouldTrackFile(path)) continue
             if (!toolCallPreCapturedBefore.containsKey(path)) {
                 val before = readFileContent(path)
                 toolCallPreCapturedBefore[path] = before
-                log.info("Pre-captured BEFORE via tool_call for $path: ${before.length} chars")
             }
         }
 
-        // Refresh AGRESSIF avec retries car la limite inotify Linux fait souvent que VFS
-        // ne détecte pas le change la 1ère fois. On retry plusieurs fois à intervalles
-        // croissants pour s'assurer que VFS finit par voir le change.
-        scope.launch {
-            val delays = listOf(200L, 500L, 1000L, 2000L)
-            for ((i, d) in delays.withIndex()) {
-                delay(d)
+        // 2 retries refresh + fallback final, uniquement sur status=completed
+        // (à in_progress le write n'a pas forcément encore eu lieu).
+        if (status == "completed") {
+            scope.launch {
+                val delays = listOf(200L, 800L)
+                for ((i, d) in delays.withIndex()) {
+                    delay(d)
+                    ApplicationManager.getApplication().invokeLater {
+                        for (path in allPaths) {
+                            try {
+                                val vf = LocalFileSystem.getInstance().refreshAndFindFileByPath(path)
+                                vf?.refresh(false, false)
+                            } catch (e: Exception) {
+                                log.warn("refresh attempt #${i + 1} failed for $path", e)
+                            }
+                        }
+                    }
+                }
+                // Fallback : si VFS n'a jamais fire d'event, déclencher addOrUpdate manuel.
+                delay(400)
                 ApplicationManager.getApplication().invokeLater {
+                    val pending = project.getService(PendingChangesService::class.java)
+                    val history = project.getService(PromptHistoryService::class.java)
                     for (path in allPaths) {
+                        if (!shouldTrackFile(path)) continue
+                        val before = toolCallPreCapturedBefore.remove(path) ?: continue
                         try {
+                            val after = java.io.File(path).readText(Charsets.UTF_8)
+                            if (before == after) continue
                             val vf = LocalFileSystem.getInstance().refreshAndFindFileByPath(path)
-                            // refresh(async=false, recursive=false) force la détection sync
-                            vf?.refresh(false, false)
+                                ?: continue
+                            history.captureFileBefore(path, before)
+                            history.captureFileAfter(path, after)
+                            pending.addOrUpdate(path, before, after, vf, currentExecutingSessionId)
+                            project.getService(DiffViewerManager::class.java).scheduleRefresh()
                         } catch (e: Exception) {
-                            log.warn("refresh attempt #${i + 1} failed for $path", e)
+                            log.warn("Fallback addOrUpdate failed for $path", e)
                         }
                     }
                 }
             }
         }
 
-        // Cleanup mémoire après status=completed (avec délai pour permettre les retries de refresh)
         if (status == "completed" && toolCallId != null) {
             scope.launch {
                 delay(5000)
@@ -762,7 +735,6 @@ class ClaudeACPService(private val project: Project) {
         }
     }
 
-    /** Recursively look for a "text" field in any content/object structure of the update. */
     private fun extractTextFromUpdate(update: JsonObject): String? {
         update.get("text")?.takeIf { it.isJsonPrimitive }?.asString?.let { return it }
 
@@ -804,7 +776,6 @@ class ClaudeACPService(private val project: Project) {
             processHandler?.processInput?.let { input ->
                 input.write("$message\n".toByteArray())
                 input.flush()
-                log.info("→ ${message.take(200)}")
             }
         } catch (e: Exception) {
             log.error("Failed to send message", e)
@@ -836,9 +807,7 @@ class ClaudeACPService(private val project: Project) {
         errorListeners.forEach { it(msg) }
     }
 
-    // ── Sessions capabilities (model / mode / effort) ────────────────────────
-
-    private fun parseSessionCapabilities(result: JsonObject) {
+    private fun parseSessionCapabilities(result: JsonObject, sid: String) {
         var modelsList: List<SelectOption> = emptyList()
         var modesList: List<SelectOption> = emptyList()
         var configOptionsList: List<ConfigOption> = emptyList()
@@ -846,21 +815,18 @@ class ClaudeACPService(private val project: Project) {
         var currentMode: String? = null
         val currentConfig = mutableMapOf<String, String>()
 
-        // models : peut être sous "models" (SessionModelState) ou "availableModels"
         val modelsState = result.getAsJsonObject("models")
         if (modelsState != null) {
             modelsList = parseSelectOptions(modelsState.getAsJsonArray("availableModels"), idField = "modelId")
             currentModel = modelsState.get("currentModelId")?.asString
         }
 
-        // modes : SessionModeState
         val modesState = result.getAsJsonObject("modes")
         if (modesState != null) {
             modesList = parseSelectOptions(modesState.getAsJsonArray("availableModes"), idField = "id")
             currentMode = modesState.get("currentModeId")?.asString
         }
 
-        // configOptions : array de SessionConfigOption
         val configArr = result.getAsJsonArray("configOptions")
         if (configArr != null) {
             configOptionsList = configArr.mapNotNull { item ->
@@ -877,7 +843,7 @@ class ClaudeACPService(private val project: Project) {
             }
         }
 
-        sessionConfig = SessionConfig(
+        val config = SessionConfig(
             models = modelsList,
             modes = modesList,
             configOptions = configOptionsList,
@@ -885,8 +851,8 @@ class ClaudeACPService(private val project: Project) {
             currentModeId = currentMode,
             currentConfigValues = currentConfig
         )
-        log.info("Parsed capabilities: ${modelsList.size} models, ${modesList.size} modes, ${configOptionsList.size} configs")
-        sessionConfigListeners.forEach { it(sessionConfig) }
+        sessionConfigs[sid] = config
+        sessionConfigListeners.forEach { it(sid, config) }
     }
 
     private fun parseSelectOptions(arr: com.google.gson.JsonArray?, idField: String): List<SelectOption> {
@@ -901,41 +867,43 @@ class ClaudeACPService(private val project: Project) {
         }
     }
 
-    internal fun updateSessionConfig(transform: (SessionConfig) -> SessionConfig) {
-        sessionConfig = transform(sessionConfig)
-        sessionConfigListeners.forEach { it(sessionConfig) }
+    internal fun updateSessionConfig(sid: String, transform: (SessionConfig) -> SessionConfig) {
+        val current = sessionConfigs[sid] ?: SessionConfig()
+        val updated = transform(current)
+        sessionConfigs[sid] = updated
+        sessionConfigListeners.forEach { it(sid, updated) }
     }
 
-    fun setModel(modelId: String) {
-        val sid = sessionId ?: return
+    fun setModel(modelId: String, targetSessionId: String? = null) {
+        val sid = targetSessionId ?: sessionId ?: return
         val id = nextRequestId.getAndIncrement()
         pendingRequests[id] = { response ->
             if (response.has("error")) notifyError("setModel failed: ${response.get("error")}")
-            else updateSessionConfig { it.copy(currentModelId = modelId) }
+            else updateSessionConfig(sid) { it.copy(currentModelId = modelId) }
         }
         val msg = """{"jsonrpc":"2.0","id":$id,"method":"session/set_model","params":""" +
             """{"sessionId":"$sid","modelId":${escapeJson(modelId)}}}"""
         sendRawMessage(msg)
     }
 
-    fun setMode(modeId: String) {
-        val sid = sessionId ?: return
+    fun setMode(modeId: String, targetSessionId: String? = null) {
+        val sid = targetSessionId ?: sessionId ?: return
         val id = nextRequestId.getAndIncrement()
         pendingRequests[id] = { response ->
             if (response.has("error")) notifyError("setMode failed: ${response.get("error")}")
-            else updateSessionConfig { it.copy(currentModeId = modeId) }
+            else updateSessionConfig(sid) { it.copy(currentModeId = modeId) }
         }
         val msg = """{"jsonrpc":"2.0","id":$id,"method":"session/set_mode","params":""" +
             """{"sessionId":"$sid","modeId":${escapeJson(modeId)}}}"""
         sendRawMessage(msg)
     }
 
-    fun setConfigOption(optionId: String, value: String) {
-        val sid = sessionId ?: return
+    fun setConfigOption(optionId: String, value: String, targetSessionId: String? = null) {
+        val sid = targetSessionId ?: sessionId ?: return
         val id = nextRequestId.getAndIncrement()
         pendingRequests[id] = { response ->
             if (response.has("error")) notifyError("setConfigOption failed: ${response.get("error")}")
-            else updateSessionConfig {
+            else updateSessionConfig(sid) {
                 it.copy(currentConfigValues = it.currentConfigValues + (optionId to value))
             }
         }
@@ -947,16 +915,24 @@ class ClaudeACPService(private val project: Project) {
     fun addMessageChunkListener(l: (text: String, sessionId: String?) -> Unit) { messageChunkListeners.add(l) }
     fun addThoughtChunkListener(l: (text: String, sessionId: String?) -> Unit) { thoughtChunkListeners.add(l) }
     fun addToolCallListener(l: (ToolCallInfo) -> Unit) { toolCallListeners.add(l) }
-    fun addSessionConfigListener(l: (SessionConfig) -> Unit) { sessionConfigListeners.add(l) }
-
+    fun addSessionConfigListener(l: (String?, SessionConfig) -> Unit) { sessionConfigListeners.add(l) }
     fun addMessageListener(listener: (JsonObject) -> Unit) { messageListeners.add(listener) }
     fun addStderrListener(listener: (String) -> Unit) { stderrListeners.add(listener) }
     fun addInfoListener(listener: (String) -> Unit) { infoListeners.add(listener) }
     fun addErrorListener(listener: (String) -> Unit) { errorListeners.add(listener) }
     fun addStateListener(listener: (State) -> Unit) { stateListeners.add(listener) }
+    fun removeStateListener(listener: (State) -> Unit) { stateListeners.remove(listener) }
 
     fun stopAgent() {
-        processHandler?.destroyProcess()
+        try {
+            processHandler?.destroyProcess()
+        } catch (e: Exception) {
+            log.warn("destroyProcess failed", e)
+        }
+        processHandler = null
+        sessionId = null
+        currentExecutingSessionId = null
+        setExecuting(false)
         setState(State.STOPPED)
     }
 
