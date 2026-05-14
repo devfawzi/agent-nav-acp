@@ -104,6 +104,33 @@ class PromptHistoryService(private val project: Project) {
     }
 
     /**
+     * Remap le sessionId du prompt courant (utilisé en mode CLI quand le placeholder
+     * "pending-..." est remplacé par le vrai sid une fois `system:init` reçu).
+     */
+    fun remapCurrentSessionId(newSessionId: String) {
+        currentPrompt?.let { old ->
+            val replaced = old.copy(sessionId = newSessionId)
+            // PromptSnapshot est data class avec mutableMaps : on remplace dans la liste
+            val idx = prompts.indexOf(old)
+            if (idx >= 0) {
+                // Préserver les références aux maps (copy() les recrée vides sans le constructor)
+                // → on créé manuellement avec les anciens maps
+                val withMaps = PromptSnapshot(
+                    promptId = old.promptId,
+                    promptText = old.promptText,
+                    sessionId = newSessionId,
+                    timestamp = old.timestamp,
+                    filesBefore = old.filesBefore,
+                    filesAfter = old.filesAfter
+                )
+                prompts[idx] = withMaps
+                currentPrompt = withMaps
+                log.info("Remapped prompt #${old.promptId} sid → $newSessionId")
+            }
+        }
+    }
+
+    /**
      * Indique si un prompt est en cours (utilisé par le VFS listener pour filtrer
      * les changements de fichiers qui appartiennent à un prompt actif).
      */

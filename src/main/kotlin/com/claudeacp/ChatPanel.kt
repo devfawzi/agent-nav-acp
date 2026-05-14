@@ -116,6 +116,16 @@ class ChatPanel(private val project: Project? = null) {
             return
         }
 
+        // Plan mode : claude n'écrit pas réellement sur disque. On affiche le contenu
+        // proposé inline dans le chat (preview cliquable) pour que l'user puisse naviguer.
+        val isPlanMode = info.permissionMode == "plan"
+        if (isPlanMode && info.status == "in_progress" && info.path != null &&
+            project != null && (info.writeContent != null || info.editNewString != null)) {
+            finalizePending()
+            addMessage(PlanPreviewCard(project, info))
+            return
+        }
+
         // Skip les events sans info utile : status=completed des Edit/Write/Read renvoie
         // un title="tool"/"edit" générique sans path/command. On l'a déjà affiché au
         // tool_call_update précédent (qui avait le path), donc on ignore le completed.
@@ -562,6 +572,92 @@ private class RunCommandBlock(initialCommand: String) : JPanel(BorderLayout()) {
     fun setDone() {
         statusLabel.text = "✓ Done"
         statusLabel.foreground = JBColor(Color(0x2e7d32), Color(0x81c784))
+    }
+
+    override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
+}
+
+/**
+ * Card affichée en mode "plan" quand claude propose une modif de fichier mais ne l'écrit
+ * pas sur disque. Affiche le path + un bouton pour ouvrir le contenu proposé dans un
+ * éditeur virtuel scratch (l'user peut le copier/coller s'il veut l'appliquer).
+ */
+private class PlanPreviewCard(
+    project: Project,
+    private val info: ClaudeACPService.ToolCallInfo
+) : JPanel(BorderLayout()) {
+
+    private val cardBg = JBColor(Color(0xfff8e7), Color(0x3a3520))  // jaune pâle : "proposé"
+
+    init {
+        background = cardBg
+        border = RoundedBorder(JBColor(Color(0xc89c00), Color(0xffb74d)), 8)
+        alignmentX = Component.LEFT_ALIGNMENT
+
+        val path = info.path ?: "(unknown)"
+        val displayName = run {
+            val base = project.basePath
+            if (base != null && path.startsWith(base)) path.substring(base.length).trimStart('/')
+            else java.io.File(path).name
+        }
+
+        val fileType = com.intellij.openapi.fileTypes.FileTypeManager.getInstance()
+            .getFileTypeByFileName(java.io.File(path).name)
+        val icon = fileType.icon ?: com.intellij.icons.AllIcons.FileTypes.Any_type
+
+        val isWrite = info.writeContent != null
+        val previewBody = info.writeContent
+            ?: buildString {
+                appendLine("--- old")
+                appendLine(info.editOldString ?: "")
+                appendLine("+++ new")
+                append(info.editNewString ?: "")
+            }
+        val lines = previewBody.count { it == '\n' } + 1
+
+        val titleHtml = if (isWrite) {
+            "<html>📋 <b>Plan: create</b> $displayName  <span style='color:gray'>($lines lines)</span></html>"
+        } else {
+            "<html>📋 <b>Plan: edit</b> $displayName</html>"
+        }
+        val label = JLabel(titleHtml, icon, SwingConstants.LEFT).apply {
+            font = font.deriveFont(Font.PLAIN, 12f)
+            iconTextGap = 6
+            toolTipText = path
+        }
+
+        val openBtn = JButton("Open preview").apply {
+            margin = JBUI.insets(2, 8)
+            addActionListener { openInEditor(project, displayName, previewBody, fileType) }
+        }
+
+        val main = JPanel(BorderLayout()).apply {
+            background = cardBg
+            border = JBUI.Borders.empty(4, 10)
+            add(label, BorderLayout.CENTER)
+            add(JPanel(FlowLayout(FlowLayout.RIGHT, 4, 0)).apply {
+                background = cardBg
+                add(openBtn)
+            }, BorderLayout.EAST)
+        }
+        add(main, BorderLayout.CENTER)
+    }
+
+    private fun openInEditor(
+        project: Project,
+        name: String,
+        body: String,
+        fileType: com.intellij.openapi.fileTypes.FileType
+    ) {
+        // Light virtual file = fichier en mémoire ouvrable dans un onglet IntelliJ sans
+        // toucher au disque. L'user peut lire, copier, ou save manuellement (Ctrl+S).
+        val lightFile = com.intellij.testFramework.LightVirtualFile(
+            "[plan] $name",
+            fileType,
+            body
+        )
+        com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
+            .openFile(lightFile, true)
     }
 
     override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)

@@ -143,9 +143,12 @@ class ClaudeACPToolWindowPanel(
                 chatPanel.appendError("Agent not ready (state=${acpService.state})")
                 return@onSend
             }
-            if (mySessionId == null) {
-                // Sécurité : ne devrait plus arriver car Chat 1 claim auto via state listener
-                // et Chat 2+ via la factory. Si on tombe ici, on évite tout fallback global.
+            // En CLI mode, mySessionId est null tant que claude n'a pas émis son 1er
+            // system:init (peut arriver seulement après notre 1er user message). On
+            // autorise donc le 1er send même sans sid : le service trouvera le
+            // pendingCliProc et on claim le sid quand il arrive.
+            val isCliMode = acpService.activeProfile.transport == Transport.CLI_STREAM_JSON
+            if (mySessionId == null && !isCliMode) {
                 chatPanel.appendError("No session attached to this chat — try opening a new chat.")
                 return@onSend
             }
@@ -208,6 +211,17 @@ class ClaudeACPToolWindowPanel(
             if (acpService.state == ClaudeACPService.State.READY && mySessionId == null) {
                 acpService.sessionId?.let { setSessionId(it) }
             }
+            // En CLI mode : le sid arrive après le 1er user message (via system:init),
+            // donc on écoute aussi sessionCreatedListener pour claim à ce moment-là.
+            val firstSidClaim = object : (String) -> Unit {
+                override fun invoke(sid: String) {
+                    if (mySessionId == null) {
+                        setSessionId(sid)
+                        acpService.removeSessionCreatedListener(this)
+                    }
+                }
+            }
+            acpService.addSessionCreatedListener(firstSidClaim)
         }
 
         acpService.addStateListener { newState ->
@@ -280,6 +294,18 @@ class ClaudeACPToolWindowPanel(
         pendingService.addAddedListener { change ->
             if (matchesMySession(change.triggeredBySessionId)) {
                 ApplicationManager.getApplication().invokeLater { chatPanel.appendFileChange(change) }
+            }
+        }
+
+        // Session rebound : quand le sid de notre chat change (ex: respawn claude --resume
+        // après changement de model), on met à jour notre mySessionId pour continuer à
+        // recevoir les events.
+        acpService.addSessionReboundListener { oldSid, newSid ->
+            if (mySessionId == oldSid) {
+                mySessionId = newSid
+                ApplicationManager.getApplication().invokeLater {
+                    inputPanel.refreshConfig(acpService.getSessionConfig(newSid))
+                }
             }
         }
     }

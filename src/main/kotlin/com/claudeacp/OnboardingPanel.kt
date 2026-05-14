@@ -87,25 +87,12 @@ class OnboardingPanel(private val onRetry: () -> Unit) {
     fun update(prerequisites: ClaudeACPService.Prerequisites) {
         stepsContainer.removeAll()
 
-        if (prerequisites.npxPath == null) {
-            stepsContainer.add(buildStep(
-                stepIndex = 1,
-                title = "Install Node.js",
-                description = "The Claude Agent ACP server runs on Node.js. Install via nvm (recommended):",
-                commands = listOf(
-                    "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash",
-                    "nvm install --lts"
-                ),
-                docUrl = "https://nodejs.org/"
-            ))
-            stepsContainer.add(Box.createVerticalStrut(12))
-        }
-
         if (prerequisites.claudeCliPath == null) {
             stepsContainer.add(buildStep(
-                stepIndex = if (prerequisites.npxPath == null) 2 else 1,
+                stepIndex = 1,
                 title = "Install Claude Code CLI",
-                description = "The Claude Code CLI provides authentication and access to Claude API.",
+                description = "The Claude Code CLI runs your interactive Claude subscription " +
+                    "directly — no API tokens needed.",
                 commands = listOf(
                     "curl -fsSL https://claude.ai/install.sh | bash",
                     "claude  # then complete the login flow"
@@ -116,11 +103,22 @@ class OnboardingPanel(private val onRetry: () -> Unit) {
         }
 
         if (prerequisites.allOk) {
-            stepsContainer.add(JLabel("✅ All prerequisites are installed.").apply {
+            stepsContainer.add(JLabel("✅ Claude Code is installed.").apply {
                 foreground = JBColor.GREEN
                 font = font.deriveFont(Font.BOLD)
                 alignmentX = Component.LEFT_ALIGNMENT
             })
+            // Optionnel : suggérer OpenCode (uniquement si npx absent ET pas déjà installé)
+            if (prerequisites.npxPath == null) {
+                stepsContainer.add(Box.createVerticalStrut(12))
+                stepsContainer.add(JLabel(
+                    "<html><span style='color:gray'>" +
+                        "Optional: install Node.js if you want to use OpenCode (alternative agent)." +
+                        "</span></html>"
+                ).apply {
+                    alignmentX = Component.LEFT_ALIGNMENT
+                })
+            }
         }
 
         stepsContainer.revalidate()

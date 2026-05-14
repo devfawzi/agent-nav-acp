@@ -103,7 +103,7 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
             row("") { cell(claudeDetectedLabel) }
             row("OpenCode CLI:") { cell(opencodeField).align(AlignX.FILL) }
             row("") { cell(opencodeDetectedLabel) }
-            row("npx:") { cell(npxField).align(AlignX.FILL) }
+            row("npx (OpenCode fallback only):") { cell(npxField).align(AlignX.FILL) }
             row("") { cell(npxDetectedLabel) }
             row {
                 button("Auto-detect now") { runAutoDetect() }
@@ -221,7 +221,7 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
         val detectedNpx = AgentBinaryResolver.resolveNpx()
         npxDetectedLabel.text = if (detectedNpx != null) {
             "<html>✅ Detected: <code>$detectedNpx</code></html>"
-        } else "<html>⚠️ Not detected — install Node.js or set a path above</html>"
+        } else "<html>⚠️ Not detected — only needed if you use OpenCode via npx</html>"
     }
 }
 
