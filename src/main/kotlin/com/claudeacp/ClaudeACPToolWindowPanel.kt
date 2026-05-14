@@ -135,7 +135,7 @@ class ClaudeACPToolWindowPanel(
         root.add(chatPanel.getContent(), BorderLayout.CENTER)
         root.add(bottom, BorderLayout.SOUTH)
 
-        inputPanel.onSend { txt ->
+        inputPanel.onSend { txt, atts ->
             if (acpService.state != ClaudeACPService.State.READY) {
                 chatPanel.appendError("Agent not ready (state=${acpService.state})")
                 return@onSend
@@ -149,7 +149,17 @@ class ClaudeACPToolWindowPanel(
                 renameContentCallback?.invoke(title)
             }
             chatPanel.appendUserMessage(txt)
-            acpService.sendPrompt(txt, targetSessionId = mySessionId)
+            // Affiche aussi un petit récap des pièces jointes en dessous (chips)
+            if (atts.isNotEmpty()) {
+                val names = atts.joinToString(", ") {
+                    when (it) {
+                        is PromptAttachment.FileLink -> "📎 ${it.displayName}"
+                        is PromptAttachment.Image -> "🖼 ${it.displayName}"
+                    }
+                }
+                chatPanel.appendInfo("Attachments: $names")
+            }
+            acpService.sendPrompt(txt, targetSessionId = mySessionId, attachments = atts)
         }
 
         inputPanel.onCancel {

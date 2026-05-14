@@ -461,7 +461,11 @@ class ClaudeACPService(private val project: Project) {
         sendNewSession()
     }
 
-    fun sendPrompt(promptText: String, targetSessionId: String? = null) {
+    fun sendPrompt(
+        promptText: String,
+        targetSessionId: String? = null,
+        attachments: List<PromptAttachment> = emptyList()
+    ) {
         if (state != State.READY && targetSessionId == null) {
             notifyError("Cannot send prompt: state=$state")
             return
@@ -490,8 +494,28 @@ class ClaudeACPService(private val project: Project) {
             setExecuting(false)
         }
 
+        // Construit le tableau `prompt[]` : texte + attachments (resource_link / image)
+        val parts = mutableListOf<String>()
+        parts.add("""{"type":"text","text":${escapeJson(promptText)}}""")
+        for (att in attachments) {
+            when (att) {
+                is PromptAttachment.FileLink -> {
+                    val uri = "file://" + att.absolutePath
+                    val mime = att.mimeType?.let { ""","mimeType":${escapeJson(it)}""" } ?: ""
+                    parts.add(
+                        """{"type":"resource_link","uri":${escapeJson(uri)},"name":${escapeJson(att.displayName)}$mime}"""
+                    )
+                }
+                is PromptAttachment.Image -> {
+                    parts.add(
+                        """{"type":"image","data":${escapeJson(att.base64Data)},"mimeType":${escapeJson(att.mimeType)}}"""
+                    )
+                }
+            }
+        }
+        val promptArray = parts.joinToString(",", prefix = "[", postfix = "]")
         val msg = """{"jsonrpc":"2.0","id":$id,"method":"session/prompt","params":""" +
-            """{"sessionId":"$sid","prompt":[{"type":"text","text":${escapeJson(promptText)}}]}}"""
+            """{"sessionId":"$sid","prompt":$promptArray}}"""
         sendRawMessage(msg)
     }
 

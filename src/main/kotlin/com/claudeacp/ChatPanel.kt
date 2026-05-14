@@ -94,8 +94,7 @@ class ChatPanel(private val project: Project? = null) {
         currentAssistantMessage = null
         currentThinkingBlock = null
 
-        // Si on tracke déjà ce toolCallId comme RunCommand, on continue à le router là
-        // (le status=completed n'a plus de kind ni command, donc on ne pourrait pas re-détecter)
+        // RunCommand déjà tracké → on continue à le router là (status=completed → setDone)
         if (info.toolCallId != null && runCommandBlocks.containsKey(info.toolCallId)) {
             val block = runCommandBlocks[info.toolCallId] ?: return
             if (info.command != null) block.setCommand(info.command)
@@ -117,7 +116,15 @@ class ChatPanel(private val project: Project? = null) {
             return
         }
 
-        // Tool call standard (file ops, search, etc.)
+        // Skip les events sans info utile : status=completed des Edit/Write/Read renvoie
+        // un title="tool"/"edit" générique sans path/command. On l'a déjà affiché au
+        // tool_call_update précédent (qui avait le path), donc on ignore le completed.
+        val genericTitles = setOf("tool", "edit", "write", "read", "bash", "find", "grep", "glob")
+        val isUseless = info.path == null && info.command == null &&
+            info.title.lowercase() in genericTitles
+        if (isUseless) return
+
+        // Tool call standard avec info utile (title spécifique ou path présent)
         if (currentToolBlock == null) {
             currentToolBlock = ToolCallsBlock()
             addMessage(currentToolBlock!!)
