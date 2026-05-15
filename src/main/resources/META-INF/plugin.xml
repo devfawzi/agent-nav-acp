@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.claudeacp.bridge</id>
     <name>AgentNav ACP</name>
-    <vendor email="you@example.com" url="https://github.com/you">YourName</vendor>
+    <vendor email="you@example.com" url="https://github.com/devfawzi/agent-nav-acp">DevFawzi</vendor>
 
     <description><![CDATA[
         <h2>AgentNav ACP</h2>
