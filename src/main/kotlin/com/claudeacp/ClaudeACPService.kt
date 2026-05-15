@@ -1330,6 +1330,48 @@ class ClaudeACPService(private val project: Project) {
      */
     private val pendingControlRequests = ConcurrentHashMap<String, (success: Boolean, error: String?) -> Unit>()
 
+    /**
+     * Construit un PATH qui inclut les emplacements usuels où sont installés les outils que
+     * claude doit pouvoir spawn pour les MCP (npx, uvx, uv, python, …). Sans ça, un IntelliJ
+     * lancé depuis un launcher GUI hérite d'un PATH minimaliste et tous les MCP en stdio
+     * (Playwright, postgres, openrag, …) plantent au boot.
+     */
+    private fun buildEnrichedPath(claudeBinDir: String?): String {
+        val home = System.getProperty("user.home") ?: ""
+        val candidates = mutableListOf<String>()
+        claudeBinDir?.let { candidates.add(it) }
+        // Linux/Mac usuels (homebrew, system, snap, cargo, pip)
+        candidates.addAll(listOf(
+            "$home/.local/bin",
+            "$home/.cargo/bin",
+            "/opt/homebrew/bin",        // macOS Apple Silicon
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/snap/bin"
+        ))
+        // Détecte tous les dossiers nvm/node disponibles (le plus récent en premier)
+        val nvmRoot = File("$home/.nvm/versions/node")
+        if (nvmRoot.isDirectory) {
+            nvmRoot.listFiles { f -> f.isDirectory }
+                ?.sortedByDescending { it.name }
+                ?.forEach { candidates.add("${it.absolutePath}/bin") }
+        }
+        // Détecte volta (autre node version manager)
+        val voltaBin = File("$home/.volta/bin")
+        if (voltaBin.isDirectory) candidates.add(voltaBin.absolutePath)
+        // pyenv shims (pour python/uvx via pyenv)
+        val pyenvShims = File("$home/.pyenv/shims")
+        if (pyenvShims.isDirectory) candidates.add(pyenvShims.absolutePath)
+
+        val existing = System.getenv("PATH")?.split(":")?.filter { it.isNotBlank() } ?: emptyList()
+        // De-dup tout en gardant l'ordre : candidates d'abord (priorité), puis l'existant.
+        val ordered = LinkedHashSet<String>()
+        candidates.filter { File(it).isDirectory }.forEach { ordered.add(it) }
+        existing.forEach { ordered.add(it) }
+        return ordered.joinToString(":")
+    }
+
     private fun startCliAgent(): Boolean {
         val proc = spawnClaudeCli(resumeSid = null) ?: run {
             setState(State.ERROR)
@@ -1434,10 +1476,11 @@ class ClaudeACPService(private val project: Project) {
                 val effectiveCwd = cwdOverride ?: project.basePath
                 effectiveCwd?.let { workDirectory = File(it) }
                 withRedirectErrorStream(false)
-                File(claudeBin).parentFile?.absolutePath?.let { binDir ->
-                    val currentPath = System.getenv("PATH") ?: ""
-                    environment["PATH"] = "$binDir:$currentPath"
-                }
+                // PATH enrichi : Le PATH hérité de l'IDE peut être minimaliste (cas IntelliJ
+                // lancé depuis un launcher GUI sans .profile). Or claude doit pouvoir spawn
+                // des sous-process MCP via `npx`, `uvx`, etc. — sans ces binaires dans le PATH,
+                // les MCP fail au boot avec "Server stderr: spawn npx ENOENT".
+                environment["PATH"] = buildEnrichedPath(File(claudeBin).parentFile?.absolutePath)
                 // Forcer Node à ne pas colorer (claude est en Node) au cas où ça parasite la JSON
                 environment["NO_COLOR"] = "1"
                 environment["TERM"] = "dumb"
