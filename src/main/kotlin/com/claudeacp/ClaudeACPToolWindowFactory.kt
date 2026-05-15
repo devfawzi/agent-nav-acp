@@ -21,18 +21,26 @@ class ClaudeACPToolWindowFactory : ToolWindowFactory, DumbAware {
         addNewChatContent(project, toolWindow)
         toolWindow.setTitleActions(listOf(
             NewChatAction(project, toolWindow),
+            ResumeChatAction(project, toolWindow),
             RenameChatAction(toolWindow)
         ))
     }
 
     override fun shouldBeAvailable(project: Project): Boolean = true
 
-    private fun addNewChatContent(project: Project, toolWindow: ToolWindow): Content {
+    private fun addNewChatContent(
+        project: Project,
+        toolWindow: ToolWindow,
+        resumeSid: String? = null,
+        resumeCwd: String? = null,
+        initialTitle: String? = null
+    ): Content {
         val n = sessionCounter.getAndIncrement()
         val panel = ClaudeACPToolWindowPanel(project, isFirstChat = (n == 1))
+        val displayTitle = initialTitle ?: "Chat $n"
         val content = ContentFactory.getInstance().createContent(
             panel.getContent(),
-            "Chat $n",
+            displayTitle,
             false
         )
         content.isCloseable = sessionCounter.get() > 2
@@ -49,8 +57,22 @@ class ClaudeACPToolWindowFactory : ToolWindowFactory, DumbAware {
             content.displayName = newName
         }
 
+        val acpService = project.getService(ClaudeACPService::class.java)
+
+        if (resumeSid != null) {
+            // Reprise : spawn un nouveau process avec --resume <sid>. Pour Chat 1, on doit
+            // stopper le process initial créé par startAgent() pour repartir sur le resume.
+            // Pour Chat 2+, on resume directement (le service supporte les multi-process CLI).
+            if (n == 1 && acpService.state != ClaudeACPService.State.STOPPED) {
+                acpService.stopAgent()
+            }
+            acpService.resumeCliSession(resumeSid, cwdOverride = resumeCwd) { newSid ->
+                panel.setSessionId(newSid)
+            }
+            return content
+        }
+
         if (n > 1) {
-            val acpService = project.getService(ClaudeACPService::class.java)
             // Crée la session immédiatement si possible, sinon attend que le service soit READY.
             if (acpService.state == ClaudeACPService.State.READY ||
                 acpService.state == ClaudeACPService.State.CREATING_SESSION) {
@@ -69,6 +91,30 @@ class ClaudeACPToolWindowFactory : ToolWindowFactory, DumbAware {
         }
 
         return content
+    }
+
+    private inner class ResumeChatAction(
+        private val project: Project,
+        private val toolWindow: ToolWindow
+    ) : AnAction("Resume Previous Chat", "Reopen a Claude Code session from history", AllIcons.Vcs.History) {
+        override fun actionPerformed(e: AnActionEvent) {
+            val sessionsService = project.getService(ClaudeSessionsService::class.java)
+            // Le dialog charge lui-même (current project + toggle "all projects") et filtre.
+            ResumeSessionDialog(project, sessionsService) { picked ->
+                val title = picked.firstUserMessage.take(40).let {
+                    if (picked.firstUserMessage.length > 40) "$it…" else it
+                }
+                addNewChatContent(
+                    project, toolWindow,
+                    resumeSid = picked.sessionId,
+                    // Crucial : utilise le cwd d'origine pour que `claude --resume <sid>` retrouve
+                    // la conv (sinon "No conversation found with session ID" et proc exit).
+                    resumeCwd = picked.cwd,
+                    initialTitle = title
+                )
+            }.show()
+        }
+        override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
     }
 
     private inner class NewChatAction(

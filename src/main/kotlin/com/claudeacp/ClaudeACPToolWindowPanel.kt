@@ -17,7 +17,17 @@ class ClaudeACPToolWindowPanel(
     private val historyService = project.getService(PromptHistoryService::class.java)
     private val diffManager = project.getService(DiffViewerManager::class.java)
 
-    private val chatPanel = ChatPanel(project)
+    private val chatPanel = ChatPanel(project) { toolUseId, replyText, switchModeTo ->
+        // ExitPlanMode Approve / AskUserQuestion Submit / Skip / Reject : on envoie le
+        // tool_result attendu par claude, et si demandé on switch le permission mode
+        // (typiquement plan → acceptEdits après approbation). L'ordre compte : switch
+        // d'abord pour que les Write/Edit suivants soient autorisés.
+        val sid = mySessionId
+        if (switchModeTo != null) {
+            acpService.setMode(switchModeTo, sid)
+        }
+        acpService.replyToolResult(toolUseId, replyText, sid)
+    }
     private val pendingPanel = PendingChangesPanel(project)
     private val pendingService = project.getService(PendingChangesService::class.java)
 
@@ -39,10 +49,19 @@ class ClaudeACPToolWindowPanel(
 
     fun setSessionId(sid: String) {
         mySessionId = sid
-        // Refresh la config locale pour ce sid
+        // Refresh la config locale + label session id pour faciliter `claude --resume <sid>`
         ApplicationManager.getApplication().invokeLater {
             inputPanel.refreshConfig(acpService.getSessionConfig(sid))
+            updateSessionLabel(sid)
         }
+    }
+
+    private fun updateSessionLabel(sid: String) {
+        val short = sid.take(8)
+        sessionLabel.text = "🔗 $short…"
+        sessionLabel.toolTipText = "<html>Session: <code>$sid</code><br>" +
+            "Click to copy <code>claude --resume $sid</code></html>"
+        sessionLabel.isVisible = true
     }
 
     fun getSessionId(): String? = mySessionId
@@ -51,6 +70,25 @@ class ClaudeACPToolWindowPanel(
         font = font.deriveFont(Font.PLAIN, 11f)
         foreground = JBColor.GRAY
         border = JBUI.Borders.empty(0, 8)
+    }
+
+    private val sessionLabel = JLabel("").apply {
+        font = font.deriveFont(Font.PLAIN, 10f)
+        foreground = JBColor.GRAY
+        border = JBUI.Borders.empty(0, 6)
+        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        isVisible = false
+        addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mouseClicked(e: java.awt.event.MouseEvent) {
+                val sid = mySessionId ?: return
+                val cmd = "claude --resume $sid"
+                java.awt.Toolkit.getDefaultToolkit().systemClipboard
+                    .setContents(java.awt.datatransfer.StringSelection(cmd), null)
+                val prev = text
+                text = "✓ copied"
+                javax.swing.Timer(1200) { text = prev; (it.source as javax.swing.Timer).stop() }.start()
+            }
+        })
     }
 
     private val historyButton = JButton("📋 History").apply {
@@ -121,6 +159,7 @@ class ClaudeACPToolWindowPanel(
             border = JBUI.Borders.empty(0, 4)
             add(JPanel(FlowLayout(FlowLayout.RIGHT, 4, 0)).apply {
                 background = UIUtil.getPanelBackground()
+                add(sessionLabel)
                 add(historyButton)
                 add(statusLabel)
             }, BorderLayout.EAST)
@@ -240,20 +279,29 @@ class ClaudeACPToolWindowPanel(
                     else -> JBColor.foreground()
                 }
                 inputPanel.setReady(newState == ClaudeACPService.State.READY)
+                // Pré-remplit Model/Mode/Effort/Skills/MCP dès READY pour que l'user puisse
+                // configurer AVANT d'envoyer le 1er prompt (claude n'émet system:init qu'après
+                // le 1er user message, sinon les dropdowns resteraient grisés au démarrage).
+                if (newState == ClaudeACPService.State.READY) {
+                    inputPanel.refreshConfig(acpService.getSessionConfig(mySessionId))
+                }
             }
         }
 
-        // Les infos/erreurs/stderr globaux ne sont affichés que dans le 1er chat
+        // Les infos info() reste sur le 1er chat (status connexion etc.) pour pas spammer.
         if (isFirstChat) {
             acpService.addInfoListener { msg ->
                 ApplicationManager.getApplication().invokeLater { chatPanel.appendInfo(msg) }
             }
-            acpService.addErrorListener { msg ->
-                ApplicationManager.getApplication().invokeLater { chatPanel.appendError(msg) }
-            }
-            acpService.addStderrListener { msg ->
-                ApplicationManager.getApplication().invokeLater { chatPanel.appendStderr(msg) }
-            }
+        }
+        // Erreurs et stderr : affichés sur TOUS les chats — sinon un chat resumé qui plante
+        // au boot (ex: --resume sans bon cwd) reste silencieux et l'user voit juste un cryptique
+        // "No Claude CLI process available" quand il prompte.
+        acpService.addErrorListener { msg ->
+            ApplicationManager.getApplication().invokeLater { chatPanel.appendError(msg) }
+        }
+        acpService.addStderrListener { msg ->
+            ApplicationManager.getApplication().invokeLater { chatPanel.appendStderr(msg) }
         }
         // Filtres par sessionId STRICT : si mySessionId est null, on n'affiche RIEN.
         acpService.addMessageChunkListener { text, sid ->
@@ -272,6 +320,15 @@ class ClaudeACPToolWindowPanel(
             }
         }
 
+        // Quand un tool est bloqué (Bash hors cwd, etc.), claude renvoie un tool_result is_error.
+        // On affiche le message dans le chat pour que l'user comprenne pourquoi sa commande
+        // n'a pas tourné (au lieu de voir juste un Tools (1) silencieux).
+        acpService.addToolResultErrorListener { msg, sid ->
+            if (matchesMySession(sid)) {
+                ApplicationManager.getApplication().invokeLater { chatPanel.appendError(msg) }
+            }
+        }
+
         // Config par sid : refresh des dropdowns Model/Mode/Effort uniquement pour notre session.
         acpService.addSessionConfigListener { sid, config ->
             if (sid != null && sid == mySessionId) {
@@ -281,9 +338,13 @@ class ClaudeACPToolWindowPanel(
             }
         }
 
-        // Executing par sid : le bouton Stop/Send ne change que pour le chat en cours.
+        // Executing : on accepte l'event si sid matche notre chat, OU si on n'a pas encore claim
+        // de sid (cas resume/Chat 2+ avant le 1er system:init). Le user a explicitement demandé
+        // « stop quoi qu'il arrive » → on privilégie l'affichage du ⏹ même si le routing par sid
+        // n'est pas encore résolu. cancelCliPrompt fait son propre fallback pour trouver le proc.
         acpService.addExecutingListener { executing, sid ->
-            if (sid == mySessionId) {
+            val matches = sid == mySessionId || mySessionId == null
+            if (matches) {
                 ApplicationManager.getApplication().invokeLater {
                     inputPanel.setExecutingState(executing)
                 }
@@ -294,6 +355,15 @@ class ClaudeACPToolWindowPanel(
         pendingService.addAddedListener { change ->
             if (matchesMySession(change.triggeredBySessionId)) {
                 ApplicationManager.getApplication().invokeLater { chatPanel.appendFileChange(change) }
+            }
+        }
+
+        // Permission request (--permission-prompt-tool stdio) → carte Allow/Deny inline
+        acpService.addPermissionRequestListener { req ->
+            if (matchesMySession(req.sessionId)) {
+                ApplicationManager.getApplication().invokeLater {
+                    chatPanel.appendPermissionRequest(req)
+                }
             }
         }
 

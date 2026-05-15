@@ -63,6 +63,8 @@ class PromptInputPanel(
     private val modeButton = createMenuButton("Mode")
     private val modelButton = createMenuButton("Model")
     private val effortButton = createMenuButton("Effort")
+    private val skillsButton = createMenuButton("Skills")
+    private val mcpButton = createMenuButton("MCP")
 
     private val attachButton = JButton(AllIcons.General.Add).apply {
         toolTipText = "Attach files or images"
@@ -115,40 +117,60 @@ class PromptInputPanel(
         }
 
         setupTextAreaKeys()
+        setupShiftEnterAction()  // force Shift+Enter = newline (sinon IntelliJ keymap intercepte)
         setupClipboardPaste()
         setupSmartPasteAction()  // intercepte Ctrl/Cmd+V au niveau IntelliJ Action System
         setupDragAndDrop(root)
 
-        val scrollText = JScrollPane(textArea).apply {
+        // Hauteur du textArea bornée pour que le footer (Send/Stop/Model/...) reste TOUJOURS
+        // visible même si l'user tape un long prompt. Le scroll vertical s'active dans le
+        // textArea au-delà. Sans ce cap, BoxLayout étire le scrollPane et pousse le footer
+        // hors écran.
+        val scrollText = JScrollPane(
+            textArea,
+            JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
+            JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+        ).apply {
             border = null
-            preferredSize = Dimension(0, 70)
+            preferredSize = Dimension(0, 90)
+            minimumSize = Dimension(0, 50)
+            maximumSize = Dimension(Int.MAX_VALUE, 160)
         }
 
-        val centerStack = JPanel().apply {
+        val centerStack = object : JPanel() {
+            override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
+        }.apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
             background = UIUtil.getTextFieldBackground()
             add(attachmentsPanel)
             add(scrollText)
         }
 
-        // Footer
-        val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2)).apply {
+        // Footer : dropdowns dans CENTER avec WrapLayout (multi-row si fenêtre étroite).
+        // Send/Stop dans EAST → toujours à droite, peu importe la largeur.
+        val toolbar = JPanel(WrapLayout(FlowLayout.LEFT, 4, 2)).apply {
             background = UIUtil.getPanelBackground()
             add(attachButton)
             add(agentButton)
             add(modeButton)
             add(modelButton)
             add(effortButton)
+            add(skillsButton)
+            add(mcpButton)
         }
         updateAgentButtonLabel()
         agentButton.addActionListener { showAgentMenu() }
-        val sendPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 0, 2)).apply {
+        // sendButton positionné en bas du panel EAST quand le toolbar wrap en multi-row,
+        // pour rester visuellement "fixé en bas à droite".
+        val sendPanel = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
             background = UIUtil.getPanelBackground()
-            add(sendButton)
+            add(Box.createVerticalGlue())
+            add(sendButton.apply { alignmentX = Component.RIGHT_ALIGNMENT })
         }
         val footer = JPanel(BorderLayout()).apply {
             background = UIUtil.getPanelBackground()
-            add(toolbar, BorderLayout.WEST)
+            add(toolbar, BorderLayout.CENTER)
             add(sendPanel, BorderLayout.EAST)
         }
 
@@ -200,7 +222,9 @@ class PromptInputPanel(
 
                 if (e.keyCode == KeyEvent.VK_ENTER && !e.isShiftDown) {
                     e.consume()
-                    send()
+                    // Pendant qu'un prompt s'exécute, Enter ne doit pas tenter d'envoyer
+                    // un nouveau message — il faut d'abord stopper via le bouton ⏹.
+                    if (!isExecuting) send()
                 }
             }
 
@@ -349,6 +373,25 @@ class PromptInputPanel(
                 return false
             }
         }
+    }
+
+    /**
+     * Force Shift+Enter à insérer un newline dans le textArea. Le KeyListener ne suffit pas
+     * parce qu'IntelliJ peut router Shift+Enter vers une action globale (StartNewLine etc.)
+     * avant qu'on l'attrape, ce qui fait que rien ne se passe dans notre JTextArea.
+     */
+    private fun setupShiftEnterAction() {
+        val newlineAction = object : AnAction() {
+            override fun actionPerformed(e: AnActionEvent) {
+                textArea.replaceSelection("\n")
+            }
+            override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
+        }
+        val shiftEnter = KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.SHIFT_DOWN_MASK)
+        newlineAction.registerCustomShortcutSet(
+            CustomShortcutSet(KeyboardShortcut(shiftEnter, null)),
+            textArea
+        )
     }
 
     /**
@@ -639,7 +682,10 @@ class PromptInputPanel(
     }
 
     private fun onSendButtonClick() {
-        if (isExecuting && textArea.text.trim().isEmpty()) {
+        // Stop = arrêter l'exécution en cours, point. Pas d'envoi de message en plus.
+        // L'user récupère un état idle ; s'il veut envoyer le texte déjà tapé, il cliquera Send
+        // une fois le bouton revenu à ➤.
+        if (isExecuting) {
             onCancel?.invoke()
             return
         }
@@ -647,12 +693,9 @@ class PromptInputPanel(
     }
 
     private fun send() {
+        if (isExecuting) return  // garde-fou : ne jamais envoyer pendant qu'on exécute
         val txt = textArea.text.trim()
-        if (txt.isEmpty() && attachments.isEmpty()) {
-            if (isExecuting) onCancel?.invoke()
-            return
-        }
-        if (isExecuting) onCancel?.invoke()
+        if (txt.isEmpty() && attachments.isEmpty()) return
         onSend?.invoke(txt, attachments.toList())
         textArea.text = ""
         attachments.clear()
@@ -686,6 +729,134 @@ class PromptInputPanel(
         wireModelMenu(config)
         wireModeMenu(config)
         wireEffortMenu(effortOpt)
+        wireSkillsMenu(config)
+        wireMcpMenu(config)
+    }
+
+    private fun wireSkillsMenu(config: ClaudeACPService.SessionConfig) {
+        for (l in skillsButton.actionListeners) skillsButton.removeActionListener(l)
+        val commands = config.slashCommands
+        // Sépare visuellement skills (custom user) des autres slash commands (built-in).
+        // claude renvoie les deux dans slash_commands ; le sous-ensemble `skills` (claude 2.1+)
+        // sert à les identifier.
+        val skillSet = config.skills.toSet()
+        skillsButton.isEnabled = commands.isNotEmpty()
+        skillsButton.text = if (commands.isEmpty()) "Skills" else "Skills (${commands.size}) ▾"
+        if (commands.isEmpty()) return
+        skillsButton.addActionListener {
+            val menu = JPopupMenu()
+            val (userSkills, builtins) = commands.sorted().partition { it in skillSet }
+            if (userSkills.isNotEmpty()) {
+                val header = JMenuItem("— Skills —").apply { isEnabled = false }
+                menu.add(header)
+                userSkills.forEach { cmd ->
+                    val item = JMenuItem("/$cmd")
+                    item.toolTipText = "Run skill: $cmd"
+                    item.addActionListener { insertSlashCommand(cmd) }
+                    menu.add(item)
+                }
+                if (builtins.isNotEmpty()) menu.addSeparator()
+            }
+            if (builtins.isNotEmpty()) {
+                val header = JMenuItem("— Commands —").apply { isEnabled = false }
+                menu.add(header)
+                builtins.forEach { cmd ->
+                    val item = JMenuItem("/$cmd")
+                    item.toolTipText = "Insert /$cmd"
+                    item.addActionListener { insertSlashCommand(cmd) }
+                    menu.add(item)
+                }
+            }
+            menu.show(skillsButton, 0, skillsButton.height)
+        }
+    }
+
+    private fun wireMcpMenu(config: ClaudeACPService.SessionConfig) {
+        for (l in mcpButton.actionListeners) mcpButton.removeActionListener(l)
+        val servers = config.mcpServers
+        val tools = config.mcpTools
+        mcpButton.isEnabled = servers.isNotEmpty() || tools.isNotEmpty()
+        mcpButton.text = when {
+            servers.isEmpty() && tools.isEmpty() -> "MCP"
+            servers.isEmpty() -> "MCP (${tools.size}) ▾"
+            else -> "MCP (${servers.size}/${tools.size}) ▾"
+        }
+        if (!mcpButton.isEnabled) return
+        mcpButton.addActionListener {
+            val menu = JPopupMenu()
+            if (servers.isNotEmpty()) {
+                val header = JMenuItem("— Servers —").apply { isEnabled = false }
+                menu.add(header)
+                servers.forEach { srv ->
+                    val icon = when (srv.status) {
+                        "connected" -> "🟢"
+                        "needs-auth" -> "🔑"
+                        "failed", "error" -> "❌"
+                        else -> "⚪"
+                    }
+                    val item = JMenuItem("$icon ${srv.name} (${srv.status})")
+                    item.toolTipText = when (srv.status) {
+                        "needs-auth" -> "Not authenticated. Click to insert an auth prompt."
+                        "connected" -> "Connected. Click to insert a hint that mentions this server."
+                        else -> "Status: ${srv.status}. Click to insert a mention."
+                    }
+                    item.addActionListener {
+                        when (srv.status) {
+                            "needs-auth" -> {
+                                // Demande à claude d'authentifier le server via le tool MCP correspondant
+                                // (mcp__<server>__authenticate). claude le détecte dans tools[].
+                                val insertion = "Authenticate the ${srv.name} MCP server. "
+                                textArea.text = insertion + textArea.text
+                                textArea.caretPosition = insertion.length
+                            }
+                            else -> {
+                                val insertion = "Use the ${srv.name} MCP server to "
+                                textArea.text = insertion + textArea.text
+                                textArea.caretPosition = insertion.length
+                            }
+                        }
+                        textArea.requestFocusInWindow()
+                    }
+                    menu.add(item)
+                }
+                if (tools.isNotEmpty()) menu.addSeparator()
+            }
+            if (tools.isNotEmpty()) {
+                val header = JMenuItem("— Tools —").apply { isEnabled = false }
+                menu.add(header)
+                tools.sorted().forEach { tool ->
+                    // Format: mcp__server__action → server / action
+                    val parts = tool.removePrefix("mcp__").split("__", limit = 2)
+                    val label = if (parts.size == 2) "${parts[0]} · ${parts[1]}" else tool
+                    val item = JMenuItem(label)
+                    item.toolTipText = tool
+                    item.addActionListener {
+                        // Insert mention textuelle au lieu d'invoquer direct — claude
+                        // décidera quand utiliser le tool selon l'intent.
+                        textArea.text = "Use $tool to … " + textArea.text
+                        textArea.requestFocusInWindow()
+                    }
+                    menu.add(item)
+                }
+            }
+            menu.addSeparator()
+            val openCfg = JMenuItem("⚙ Configure MCP servers…")
+            openCfg.toolTipText = "Set --mcp-config path in settings"
+            openCfg.addActionListener {
+                com.intellij.openapi.options.ShowSettingsUtil.getInstance()
+                    .showSettingsDialog(project, AgentSettingsConfigurable::class.java)
+            }
+            menu.add(openCfg)
+            menu.show(mcpButton, 0, mcpButton.height)
+        }
+    }
+
+    private fun insertSlashCommand(cmd: String) {
+        // Insère au début du textArea (les slash commands de claude doivent être seuls).
+        val insertion = "/$cmd "
+        textArea.text = insertion + textArea.text
+        textArea.caretPosition = insertion.length
+        textArea.requestFocusInWindow()
     }
 
     private fun wireModelMenu(config: ClaudeACPService.SessionConfig) {
@@ -788,6 +959,57 @@ class PromptInputPanel(
             margin = JBUI.insets(2, 6)
             isFocusPainted = false
             font = font.deriveFont(Font.PLAIN, 11f)
+        }
+    }
+
+    /**
+     * FlowLayout qui calcule correctement sa preferredSize quand les composants sont
+     * wrappés sur plusieurs lignes. Le FlowLayout standard suppose une seule ligne pour
+     * le calcul de preferred → le parent ne sait pas qu'il faut plus de hauteur.
+     * Ici on simule le wrap pour donner la vraie hauteur préférée.
+     */
+    private class WrapLayout(align: Int = LEFT, hgap: Int = 5, vgap: Int = 5) : FlowLayout(align, hgap, vgap) {
+        override fun preferredLayoutSize(target: Container): Dimension = layoutSize(target, true)
+        override fun minimumLayoutSize(target: Container): Dimension {
+            val m = layoutSize(target, false)
+            m.width -= hgap + 1
+            return m
+        }
+        private fun layoutSize(target: Container, preferred: Boolean): Dimension {
+            synchronized(target.treeLock) {
+                var targetWidth = target.size.width
+                if (targetWidth == 0) {
+                    val parent = target.parent
+                    targetWidth = if (parent != null && parent.size.width > 0) parent.size.width else Int.MAX_VALUE
+                }
+                val insets = target.insets
+                val maxWidth = (targetWidth - (insets.left + insets.right + hgap * 2)).coerceAtLeast(1)
+                val dim = Dimension(0, 0)
+                var rowWidth = 0
+                var rowHeight = 0
+                for (i in 0 until target.componentCount) {
+                    val m = target.getComponent(i)
+                    if (!m.isVisible) continue
+                    val d = if (preferred) m.preferredSize else m.minimumSize
+                    if (rowWidth + d.width > maxWidth && rowWidth > 0) {
+                        addRow(dim, rowWidth, rowHeight)
+                        rowWidth = 0
+                        rowHeight = 0
+                    }
+                    if (rowWidth != 0) rowWidth += hgap
+                    rowWidth += d.width
+                    rowHeight = maxOf(rowHeight, d.height)
+                }
+                addRow(dim, rowWidth, rowHeight)
+                dim.width += insets.left + insets.right + hgap * 2
+                dim.height += insets.top + insets.bottom + vgap * 2
+                return dim
+            }
+        }
+        private fun addRow(dim: Dimension, rowWidth: Int, rowHeight: Int) {
+            dim.width = maxOf(dim.width, rowWidth)
+            if (dim.height > 0) dim.height += vgap
+            dim.height += rowHeight
         }
     }
 

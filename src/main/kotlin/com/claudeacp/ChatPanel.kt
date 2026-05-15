@@ -24,7 +24,19 @@ import javax.swing.border.AbstractBorder
  * - Card "fichier modifié" avec View/Accept/Reject + lignes +/-
  * - Pas de scroll horizontal (wrap dynamique à la largeur du viewport)
  */
-class ChatPanel(private val project: Project? = null) {
+/**
+ * Callback invoqué par les cards interactives (ExitPlanMode, AskUserQuestion).
+ *  - `toolUseId` : identifiant du tool_use claude attend une réponse pour
+ *  - `replyText` : texte du tool_result à renvoyer
+ *  - `switchModeTo` : si non-null, mode permission à activer avant la réponse
+ *    (typiquement "acceptEdits" après Approve d'un plan).
+ */
+typealias InteractiveReplyHandler = (toolUseId: String, replyText: String, switchModeTo: String?) -> Unit
+
+class ChatPanel(
+    private val project: Project? = null,
+    private val interactiveReplyHandler: InteractiveReplyHandler? = null
+) {
 
     private val messagesPanel = JPanel().apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -94,6 +106,30 @@ class ChatPanel(private val project: Project? = null) {
         currentAssistantMessage = null
         currentThinkingBlock = null
 
+        // ExitPlanMode : claude présente son plan et attend l'approbation user. Card dédiée.
+        if (info.planContent != null && info.toolCallId != null && interactiveReplyHandler != null) {
+            finalizePending()
+            addMessage(ExitPlanModeCard(
+                project,
+                info.toolCallId,
+                info.planContent,
+                mdParser,
+                mdRenderer,
+                interactiveReplyHandler
+            ))
+            return
+        }
+        // AskUserQuestion : claude pose des questions structurées (radio/multi-select).
+        if (info.userQuestionsJson != null && info.toolCallId != null && interactiveReplyHandler != null) {
+            finalizePending()
+            addMessage(AskUserQuestionCard(
+                info.toolCallId,
+                info.userQuestionsJson,
+                interactiveReplyHandler
+            ))
+            return
+        }
+
         // RunCommand déjà tracké → on continue à le router là (status=completed → setDone)
         if (info.toolCallId != null && runCommandBlocks.containsKey(info.toolCallId)) {
             val block = runCommandBlocks[info.toolCallId] ?: return
@@ -139,13 +175,28 @@ class ChatPanel(private val project: Project? = null) {
             currentToolBlock = ToolCallsBlock()
             addMessage(currentToolBlock!!)
         }
-        currentToolBlock!!.addToolCall(info.title, info.path)
+        // Affiche le tool name + détail principal : path fichier OU pattern/url/description.
+        val secondary = info.path?.let { relativizeForDisplay(it) } ?: info.detail
+        currentToolBlock!!.addToolCall(info.title, secondary, info.path)
+    }
+
+    private fun relativizeForDisplay(path: String): String {
+        val base = project?.basePath
+        return if (base != null && path.startsWith(base)) {
+            path.substring(base.length).trimStart('/')
+        } else path
     }
 
     fun appendFileChange(change: PendingChangesService.PendingChange) {
         if (project == null) return
         finalizePending()
         addMessage(FileChangeCard(project, change))
+    }
+
+    /** Affiche un dialog inline Allow/Deny pour une permission request claude (Bash, MCP, etc.). */
+    fun appendPermissionRequest(req: ClaudeACPService.PermissionRequest) {
+        finalizePending()
+        addMessage(PermissionRequestCard(req))
     }
 
     fun appendInfo(text: String) {
@@ -355,7 +406,7 @@ private class ToolCallsBlock : JPanel(BorderLayout()) {
         background = UIUtil.getPanelBackground()
         border = JBUI.Borders.empty(2, 0)
 
-        toggle = JButton("🔧 Tools (0) ▸").apply {
+        toggle = JButton("🔧 Tools (0) ▾").apply {
             margin = JBUI.insets(2, 6)
             isFocusPainted = false
             isContentAreaFilled = false
@@ -372,22 +423,30 @@ private class ToolCallsBlock : JPanel(BorderLayout()) {
         }
         add(header, BorderLayout.NORTH)
         add(list, BorderLayout.CENTER)
-        list.isVisible = false // fermé par défaut
+        list.isVisible = true  // ouvert par défaut pour voir le fichier/commande sur lequel claude opère
     }
 
-    fun addToolCall(title: String, path: String? = null) {
+    fun addToolCall(title: String, secondary: String? = null, filePath: String? = null) {
         count++
-        val icon: Icon = if (path != null) {
-            val fileType = FileTypeManager.getInstance().getFileTypeByFileName(File(path).name)
+        val icon: Icon = if (filePath != null) {
+            val fileType = FileTypeManager.getInstance().getFileTypeByFileName(File(filePath).name)
             fileType.icon ?: AllIcons.FileTypes.Any_type
         } else {
             AllIcons.Actions.Lightning
         }
-        list.add(JLabel(title, icon, SwingConstants.LEFT).apply {
+        val labelHtml = if (secondary != null && secondary.isNotBlank()) {
+            val truncated = if (secondary.length > 100) secondary.take(97) + "…" else secondary
+            val escaped = truncated.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            "<html><b>$title</b> <span style='color:gray'>$escaped</span></html>"
+        } else {
+            "<html><b>$title</b></html>"
+        }
+        list.add(JLabel(labelHtml, icon, SwingConstants.LEFT).apply {
             font = font.deriveFont(Font.PLAIN, 12f)
             foreground = JBColor.foreground()
             border = JBUI.Borders.empty(2, 12)
             iconTextGap = 6
+            toolTipText = filePath ?: secondary
         })
         list.revalidate()
         list.repaint()
@@ -395,7 +454,7 @@ private class ToolCallsBlock : JPanel(BorderLayout()) {
     }
 
     private fun updateLabel() {
-        toggle.text = if (list.isVisible) "🔧 Tools ($count) ▾" else "🔧 Tools ($count) ▸"
+        toggle.text = if (list.isVisible) "🔧 Tools ($count) ▾" else "🔧 Tools ($count) ▸ click to expand"
     }
 }
 
@@ -658,6 +717,365 @@ private class PlanPreviewCard(
         )
         com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
             .openFile(lightFile, true)
+    }
+
+    override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
+}
+
+/**
+ * Card affichant le plan que claude propose en fin de mode plan (tool ExitPlanMode).
+ * Boutons :
+ *  - Approve & execute : switch en acceptEdits + tool_result "User approved"
+ *  - Reject : envoie tool_result "User rejected" (claude restera en plan, prêt à réviser)
+ *
+ * Une fois cliqué, les boutons sont disabled (un seul reply possible) et la card affiche
+ * le verdict pour conserver la trace dans le scroll.
+ */
+private class ExitPlanModeCard(
+    private val project: Project?,
+    private val toolUseId: String,
+    private val planMarkdown: String,
+    parser: Parser,
+    renderer: HtmlRenderer,
+    private val replyHandler: InteractiveReplyHandler
+) : JPanel(BorderLayout()) {
+
+    private val cardBg = JBColor(Color(0xfff8e7), Color(0x3a3520))
+    private val borderColor = JBColor(Color(0xc89c00), Color(0xffb74d))
+    private val statusLabel = JLabel("").apply {
+        font = font.deriveFont(Font.ITALIC, 11f)
+        foreground = JBColor.GRAY
+        border = JBUI.Borders.empty(2, 8, 0, 0)
+    }
+    private val approveBtn = JButton("✅ Approve & execute")
+    private val rejectBtn = JButton("✗ Reject")
+
+    init {
+        background = cardBg
+        border = RoundedBorder(borderColor, 8)
+        alignmentX = Component.LEFT_ALIGNMENT
+        layout = BorderLayout()
+
+        val title = JLabel("<html>📋 <b>Plan ready — review &amp; approve</b></html>").apply {
+            font = font.deriveFont(Font.PLAIN, 12f)
+            border = JBUI.Borders.empty(6, 10, 2, 10)
+        }
+
+        val planHtml = renderer.render(parser.parse(planMarkdown))
+        val pane = JEditorPane().apply {
+            contentType = "text/html"
+            isEditable = false
+            text = "<html><body style='font-family:sans-serif; font-size:11px;'>$planHtml</body></html>"
+            background = cardBg
+            foreground = JBColor.foreground()
+            border = JBUI.Borders.empty(0, 12, 4, 12)
+            putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
+        }
+
+        approveBtn.margin = JBUI.insets(2, 8)
+        rejectBtn.margin = JBUI.insets(2, 8)
+        approveBtn.addActionListener {
+            lockButtons("✓ Approved — switching to acceptEdits and proceeding…")
+            // Switch mode AVANT la réponse pour que claude exécute vraiment les Write/Edit.
+            replyHandler(
+                toolUseId,
+                "User approved the plan. Proceed with the implementation.",
+                "acceptEdits"
+            )
+        }
+        rejectBtn.addActionListener {
+            lockButtons("✗ Rejected — claude stays in plan mode")
+            replyHandler(
+                toolUseId,
+                "User rejected the plan. Please revise it or wait for new instructions.",
+                null
+            )
+        }
+
+        val buttons = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+            background = cardBg
+            border = JBUI.Borders.empty(2, 10, 8, 10)
+            add(approveBtn)
+            add(rejectBtn)
+            add(statusLabel)
+        }
+
+        val center = JPanel(BorderLayout()).apply {
+            background = cardBg
+            add(title, BorderLayout.NORTH)
+            add(pane, BorderLayout.CENTER)
+            add(buttons, BorderLayout.SOUTH)
+        }
+        add(center, BorderLayout.CENTER)
+    }
+
+    private fun lockButtons(message: String) {
+        approveBtn.isEnabled = false
+        rejectBtn.isEnabled = false
+        statusLabel.text = message
+    }
+
+    override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
+}
+
+/**
+ * Card affichant les questions structurées posées par claude (tool AskUserQuestion).
+ * Chaque question a un titre + des options (single ou multi-select). Submit envoie un
+ * tool_result texte décrivant les choix de l'user.
+ */
+private class AskUserQuestionCard(
+    private val toolUseId: String,
+    questionsJson: String,
+    private val replyHandler: InteractiveReplyHandler
+) : JPanel(BorderLayout()) {
+
+    private val cardBg = JBColor(Color(0xeaf3ff), Color(0x1f2d3d))
+    private val borderColor = JBColor(Color(0x5b89d9), Color(0x4a6fa5))
+    private val statusLabel = JLabel("").apply {
+        font = font.deriveFont(Font.ITALIC, 11f)
+        foreground = JBColor.GRAY
+        border = JBUI.Borders.empty(2, 8, 0, 0)
+    }
+    private val submitBtn = JButton("Submit answers")
+    private val skipBtn = JButton("Skip")
+    private val questionGroups = mutableListOf<QuestionGroup>()
+
+    private data class QuestionGroup(
+        val question: String,
+        val header: String?,
+        val multiSelect: Boolean,
+        val options: List<OptionEntry>,
+        /** Pour single-select : tous radios partagent un ButtonGroup. Pour multi : null. */
+        val buttonGroup: ButtonGroup?
+    )
+
+    private data class OptionEntry(val label: String, val description: String?, val button: JToggleButton)
+
+    init {
+        background = cardBg
+        border = RoundedBorder(borderColor, 8)
+        alignmentX = Component.LEFT_ALIGNMENT
+        layout = BorderLayout()
+
+        val title = JLabel("<html>❓ <b>Claude has a few questions</b></html>").apply {
+            font = font.deriveFont(Font.PLAIN, 12f)
+            border = JBUI.Borders.empty(6, 10, 4, 10)
+        }
+
+        val body = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            background = cardBg
+            border = JBUI.Borders.empty(0, 12, 4, 12)
+        }
+
+        try {
+            val arr = com.google.gson.JsonParser.parseString(questionsJson).asJsonArray
+            arr.forEachIndexed { qIdx, qEl ->
+                if (!qEl.isJsonObject) return@forEachIndexed
+                val q = qEl.asJsonObject
+                val questionText = q.get("question")?.asString ?: "Question ${qIdx + 1}"
+                val header = q.get("header")?.asString
+                val multi = q.get("multiSelect")?.asBoolean == true
+                val opts = q.getAsJsonArray("options") ?: com.google.gson.JsonArray()
+
+                if (qIdx > 0) body.add(Box.createVerticalStrut(8))
+                if (!header.isNullOrBlank()) {
+                    body.add(JLabel("<html><b>$header</b></html>").apply {
+                        font = font.deriveFont(Font.PLAIN, 11f)
+                        alignmentX = Component.LEFT_ALIGNMENT
+                    })
+                }
+                body.add(JLabel("<html><div style='width:520px;'>$questionText</div></html>").apply {
+                    font = font.deriveFont(Font.PLAIN, 12f)
+                    alignmentX = Component.LEFT_ALIGNMENT
+                    border = JBUI.Borders.empty(2, 0, 4, 0)
+                })
+
+                val group = if (!multi) ButtonGroup() else null
+                val entries = mutableListOf<OptionEntry>()
+                opts.forEachIndexed { oIdx, oEl ->
+                    if (!oEl.isJsonObject) return@forEachIndexed
+                    val o = oEl.asJsonObject
+                    val label = o.get("label")?.asString ?: "Option ${oIdx + 1}"
+                    val desc = o.get("description")?.asString
+                    val labelHtml = if (desc.isNullOrBlank()) label
+                    else "<html><b>$label</b><br><span style='color:gray;font-size:10px;'>$desc</span></html>"
+                    val btn: JToggleButton = if (multi) {
+                        JCheckBox(labelHtml).apply {
+                            isOpaque = false
+                            alignmentX = Component.LEFT_ALIGNMENT
+                            border = JBUI.Borders.empty(1, 4)
+                            if (oIdx == 0) isSelected = false
+                        }
+                    } else {
+                        JRadioButton(labelHtml).apply {
+                            isOpaque = false
+                            alignmentX = Component.LEFT_ALIGNMENT
+                            border = JBUI.Borders.empty(1, 4)
+                            if (oIdx == 0) isSelected = true
+                            group?.add(this)
+                        }
+                    }
+                    body.add(btn)
+                    entries.add(OptionEntry(label, desc, btn))
+                }
+                questionGroups.add(QuestionGroup(questionText, header, multi, entries, group))
+            }
+        } catch (e: Exception) {
+            body.add(JLabel("<html><span style='color:red;'>Failed to parse questions: ${e.message}</span></html>"))
+        }
+
+        submitBtn.margin = JBUI.insets(2, 8)
+        skipBtn.margin = JBUI.insets(2, 8)
+        submitBtn.addActionListener { submit() }
+        skipBtn.addActionListener {
+            lockButtons("✗ Skipped")
+            replyHandler(
+                toolUseId,
+                "User declined to answer the questions. Proceed with reasonable defaults.",
+                null
+            )
+        }
+
+        val buttons = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+            background = cardBg
+            border = JBUI.Borders.empty(2, 10, 8, 10)
+            add(submitBtn)
+            add(skipBtn)
+            add(statusLabel)
+        }
+
+        val center = JPanel(BorderLayout()).apply {
+            background = cardBg
+            add(title, BorderLayout.NORTH)
+            add(body, BorderLayout.CENTER)
+            add(buttons, BorderLayout.SOUTH)
+        }
+        add(center, BorderLayout.CENTER)
+    }
+
+    private fun submit() {
+        val sb = StringBuilder("User answered:\n")
+        questionGroups.forEachIndexed { qIdx, qg ->
+            val picked = qg.options.filter { it.button.isSelected }.map { it.label }
+            sb.append("Q${qIdx + 1} (")
+            sb.append(qg.header ?: qg.question.take(60))
+            sb.append("): ")
+            sb.append(if (picked.isEmpty()) "(no choice)" else picked.joinToString(", "))
+            sb.append('\n')
+        }
+        lockButtons("✓ Submitted")
+        replyHandler(toolUseId, sb.toString().trimEnd(), null)
+    }
+
+    private fun lockButtons(message: String) {
+        submitBtn.isEnabled = false
+        skipBtn.isEnabled = false
+        questionGroups.flatMap { it.options }.forEach { it.button.isEnabled = false }
+        statusLabel.text = message
+    }
+
+    override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
+}
+
+/**
+ * Card affichée quand claude demande l'autorisation d'utiliser un tool (Bash, MCP, etc.)
+ * via le `sdk_control_request` subtype:"permission" (activé par --permission-prompt-tool stdio).
+ *
+ * Boutons Allow / Deny. Quand l'user choisit, on appelle le respondAllow/respondDeny du
+ * service qui renvoie un control_response à claude pour débloquer ou refuser le tool.
+ */
+private class PermissionRequestCard(
+    private val req: ClaudeACPService.PermissionRequest
+) : JPanel(BorderLayout()) {
+
+    private val cardBg = JBColor(Color(0xfff4d6), Color(0x3a2f1a))
+    private val borderColor = JBColor(Color(0xd97706), Color(0xfbbf24))
+    private val statusLabel = JLabel("").apply {
+        font = font.deriveFont(Font.ITALIC, 11f)
+        foreground = JBColor.GRAY
+        border = JBUI.Borders.empty(2, 8, 0, 0)
+    }
+    private val allowBtn = JButton("✅ Allow")
+    private val denyBtn = JButton("✗ Deny")
+    @Volatile private var done = false
+
+    init {
+        background = cardBg
+        border = RoundedBorder(borderColor, 8)
+        alignmentX = Component.LEFT_ALIGNMENT
+
+        val toolPreview = buildPreview(req.toolName, req.toolInput)
+        val title = JLabel(
+            "<html>🔐 <b>Claude wants to use <code>${req.toolName}</code></b></html>"
+        ).apply {
+            font = font.deriveFont(Font.PLAIN, 12f)
+            border = JBUI.Borders.empty(6, 10, 2, 10)
+        }
+        val previewArea = JTextArea(toolPreview).apply {
+            isEditable = false
+            isFocusable = true
+            lineWrap = true
+            wrapStyleWord = false
+            font = Font(Font.MONOSPACED, Font.PLAIN, 11)
+            foreground = JBColor.foreground()
+            background = cardBg
+            border = JBUI.Borders.empty(0, 12, 4, 12)
+        }
+
+        allowBtn.margin = JBUI.insets(2, 8)
+        denyBtn.margin = JBUI.insets(2, 8)
+        allowBtn.addActionListener {
+            if (done) return@addActionListener
+            done = true
+            lockButtons("✓ Allowed")
+            req.respondAllow()
+        }
+        denyBtn.addActionListener {
+            if (done) return@addActionListener
+            done = true
+            lockButtons("✗ Denied")
+            req.respondDeny("Denied by user")
+        }
+
+        val buttons = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+            background = cardBg
+            border = JBUI.Borders.empty(2, 10, 8, 10)
+            add(allowBtn)
+            add(denyBtn)
+            add(statusLabel)
+        }
+
+        val center = JPanel(BorderLayout()).apply {
+            background = cardBg
+            add(title, BorderLayout.NORTH)
+            add(previewArea, BorderLayout.CENTER)
+            add(buttons, BorderLayout.SOUTH)
+        }
+        add(center, BorderLayout.CENTER)
+    }
+
+    private fun buildPreview(toolName: String, rawInput: String?): String {
+        if (rawInput.isNullOrBlank()) return ""
+        return try {
+            val obj = com.google.gson.JsonParser.parseString(rawInput).asJsonObject
+            when (toolName) {
+                "Bash" -> obj.get("command")?.asString ?: rawInput
+                "Read", "Edit", "Write", "MultiEdit" ->
+                    obj.get("file_path")?.asString
+                        ?: obj.get("path")?.asString
+                        ?: rawInput
+                else -> obj.entrySet().joinToString("\n") { "${it.key}: ${it.value}" }
+            }
+        } catch (_: Exception) {
+            rawInput
+        }
+    }
+
+    private fun lockButtons(message: String) {
+        allowBtn.isEnabled = false
+        denyBtn.isEnabled = false
+        statusLabel.text = message
     }
 
     override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)

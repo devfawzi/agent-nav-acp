@@ -34,11 +34,25 @@ data class AgentProfile(
             displayName = "Claude Code",
             // CLI direct, pas l'ACP npm. Reste sur le plan d'abonnement interactif.
             command = "claude",
+            // IMPORTANT : on n'utilise PAS -p / --print, même si `claude --help` indique que
+            // --input-format stream-json "only works with --print". Test direct (claude 2.1.123,
+            // 2026-05-15) montre que le bidirectionnel stream-json + control_request
+            // (set_model, set_permission_mode, interrupt) + --permission-prompt-tool stdio
+            // fonctionnent tous SANS -p.
+            //
+            // Pourquoi ça importe : à partir du 15 juin 2026, Anthropic facture `claude -p`
+            // sur un bucket "Agent SDK credit" séparé du plan subscription interactif
+            // (~$200/mois sur Max 20x, puis pay-as-you-go API). Rester sans -p garde le plugin
+            // sur le tarif subscription standard, comme l'usage terminal/IDE classique.
             args = listOf(
                 "--output-format", "stream-json",
                 "--input-format", "stream-json",
                 "--verbose",
-                "--permission-mode", "acceptEdits"
+                "--permission-mode", "acceptEdits",
+                // Route les permission requests via le control channel (sdk_control_request
+                // subtype:permission) au lieu d'un prompt TTY. Permet au plugin d'afficher
+                // un dialog Allow/Deny custom pour les Bash/MCP/etc.
+                "--permission-prompt-tool", "stdio"
             ),
             transport = Transport.CLI_STREAM_JSON,
             docUrl = "https://docs.claude.com/en/docs/claude-code/quickstart",

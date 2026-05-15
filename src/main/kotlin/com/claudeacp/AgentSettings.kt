@@ -19,7 +19,9 @@ class AgentSettings : PersistentStateComponent<AgentSettings.State> {
     data class State(
         var claudeCliPath: String = "",
         var npxPath: String = "",
-        var opencodePath: String = ""
+        var opencodePath: String = "",
+        /** Path to a JSON file passed to `claude --mcp-config <path>`. Empty = use claude's global config. */
+        var mcpConfigPath: String = ""
     )
 
     private var state = State()
@@ -47,9 +49,16 @@ class AgentSettings : PersistentStateComponent<AgentSettings.State> {
             state.opencodePath = value
         }
 
+    var mcpConfigPath: String
+        get() = state.mcpConfigPath
+        set(value) {
+            state.mcpConfigPath = value
+        }
+
     fun getClaudeCliPathOrNull(): String? = claudeCliPath.takeIf { it.isNotBlank() }
     fun getNpxPathOrNull(): String? = npxPath.takeIf { it.isNotBlank() }
     fun getOpencodePathOrNull(): String? = opencodePath.takeIf { it.isNotBlank() }
+    fun getMcpConfigPathOrNull(): String? = mcpConfigPath.takeIf { it.isNotBlank() && java.io.File(it).isFile }
 
     companion object {
         fun getInstance(): AgentSettings = service()

@@ -31,9 +31,11 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
     private val claudeField = TextFieldWithBrowseButton()
     private val npxField = TextFieldWithBrowseButton()
     private val opencodeField = TextFieldWithBrowseButton()
+    private val mcpConfigField = TextFieldWithBrowseButton()
     private val claudeDetectedLabel = JBLabel("")
     private val npxDetectedLabel = JBLabel("")
     private val opencodeDetectedLabel = JBLabel("")
+    private val mcpConfigStatusLabel = JBLabel("")
 
     private val profilesListModel = DefaultListModel<AgentProfile>()
     private val profilesList = JBList(profilesListModel)
@@ -54,6 +56,16 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
             FileChooserDescriptorFactory.createSingleFileDescriptor(),
             TextComponentAccessor.TEXT_FIELD_WHOLE_TEXT
         )
+        mcpConfigField.addBrowseFolderListener(
+            "Select MCP config JSON file", null, null,
+            FileChooserDescriptorFactory.createSingleFileDescriptor("json"),
+            TextComponentAccessor.TEXT_FIELD_WHOLE_TEXT
+        )
+        mcpConfigField.textField.document.addDocumentListener(object : javax.swing.event.DocumentListener {
+            override fun insertUpdate(e: javax.swing.event.DocumentEvent) = refreshMcpStatus()
+            override fun removeUpdate(e: javax.swing.event.DocumentEvent) = refreshMcpStatus()
+            override fun changedUpdate(e: javax.swing.event.DocumentEvent) = refreshMcpStatus()
+        })
 
         profilesList.cellRenderer = object : DefaultListCellRenderer() {
             override fun getListCellRendererComponent(
@@ -92,6 +104,18 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
                 button("Test connection") { testSelected() }
             }
         }
+        group("MCP servers (Claude Code only)") {
+            row {
+                text(
+                    "Optional path to a JSON file passed to <code>claude --mcp-config &lt;file&gt;</code>. " +
+                        "Format: <code>{\"mcpServers\": {\"name\": {\"command\": \"...\", \"args\": [], \"env\": {}}}}</code>. " +
+                        "HTTP servers: add <code>\"type\": \"http\"</code>. " +
+                        "Leave empty to use claude's global config (managed via <code>claude mcp add</code>)."
+                )
+            }
+            row("MCP config file:") { cell(mcpConfigField).align(AlignX.FILL) }
+            row("") { cell(mcpConfigStatusLabel) }
+        }
         group("Binaries auto-discovery") {
             row {
                 text(
@@ -115,21 +139,44 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
         claudeField.text = binarySettings.claudeCliPath
         npxField.text = binarySettings.npxPath
         opencodeField.text = binarySettings.opencodePath
+        mcpConfigField.text = binarySettings.mcpConfigPath
         refreshDetectedLabels()
+        refreshMcpStatus()
         refreshProfilesList()
     }
 
     override fun isModified(): Boolean {
         return claudeField.text != binarySettings.claudeCliPath ||
             npxField.text != binarySettings.npxPath ||
-            opencodeField.text != binarySettings.opencodePath
+            opencodeField.text != binarySettings.opencodePath ||
+            mcpConfigField.text != binarySettings.mcpConfigPath
     }
 
     override fun apply() {
         binarySettings.claudeCliPath = claudeField.text.trim()
         binarySettings.npxPath = npxField.text.trim()
         binarySettings.opencodePath = opencodeField.text.trim()
+        binarySettings.mcpConfigPath = mcpConfigField.text.trim()
         refreshDetectedLabels()
+        refreshMcpStatus()
+    }
+
+    private fun refreshMcpStatus() {
+        val path = mcpConfigField.text.trim()
+        mcpConfigStatusLabel.text = computeMcpStatus(path)
+    }
+
+    private fun computeMcpStatus(path: String): String {
+        if (path.isEmpty()) return "<html><i>Empty → using claude's global MCP config.</i></html>"
+        val file = java.io.File(path)
+        if (!file.isFile) return "<html>⚠️ File not found: <code>$path</code></html>"
+        return try {
+            val json = com.google.gson.JsonParser.parseString(file.readText()).asJsonObject
+            val servers = json.getAsJsonObject("mcpServers")?.keySet()?.toList().orEmpty()
+            "<html>✅ ${servers.size} MCP server(s): <code>${servers.joinToString(", ")}</code></html>"
+        } catch (e: Exception) {
+            "<html>⚠️ Invalid JSON: ${e.message}</html>"
+        }
     }
 
     private fun refreshProfilesList() {

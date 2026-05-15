@@ -42,7 +42,11 @@ class FileMentionPopup(
         val icon: Icon
     )
 
-    private val allEntries: List<FileEntry> by lazy { buildIndex() }
+    // Index rebuild à chaque ouverture du popup. Le lazy précédent gardait un cache à vie,
+    // ce qui retournait des résultats obsolètes après création/suppression de fichiers.
+    // Le rebuild est rapide (ProjectFileIndex en mémoire, ~ms).
+    @Volatile
+    private var allEntries: List<FileEntry> = emptyList()
     private var currentPopup: JBPopup? = null
 
     /** Index du `@` dans le textarea (sert au positionnement). */
@@ -52,6 +56,7 @@ class FileMentionPopup(
     fun show(query: String) {
         // Si déjà visible avec la même query, on ne refait rien
         if (isVisible()) return
+        allEntries = buildIndex()
         if (allEntries.isEmpty()) return
 
         val initial = filterEntries(query)
@@ -163,8 +168,12 @@ class FileMentionPopup(
                 if (ignoredSegments.any { "/$it/" in path || path.endsWith("/$it") }) {
                     return@iterateContent true
                 }
-                val rel = if (path.startsWith(basePath)) path.substring(basePath.length).trimStart('/')
-                else vf.name
+                // STRICT : ne montrer que les fichiers à l'intérieur du projet courant.
+                // ProjectFileIndex.iterateContent peut renvoyer des fichiers hors basePath
+                // (libs externes, sources rattachées) — on filtre pour que la popup `@`
+                // ne pollue pas avec des fichiers d'autres répertoires.
+                if (!path.startsWith(basePath)) return@iterateContent true
+                val rel = path.substring(basePath.length).trimStart('/')
                 if (rel.isBlank()) return@iterateContent true
                 val icon: Icon = if (vf.isDirectory) {
                     com.intellij.icons.AllIcons.Nodes.Folder
