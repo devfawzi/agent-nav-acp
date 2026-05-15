@@ -151,13 +151,29 @@ class DiffViewerManager(private val project: Project) {
             factory.create(change.lastSnapshotAfter, fileType)
         }
 
-        return SimpleDiffRequest(
+        val req = SimpleDiffRequest(
             "Claude: $fileName",
             leftContent,
             rightContent,
-            "Before (avant Claude)",
-            "After (sur disque)"
+            "Before Claude",
+            "After Claude"
         )
+        // Toolbar actions : Accept/Reject pour le fichier entier. Le hunk-by-hunk est déjà
+        // géré nativement par IntelliJ via les flèches ⮜/⮞ dans la gutter du diff (copier
+        // ou revert un hunk individuellement).
+        // Toolbar minimal : Accept All / Reject All du fichier + picker palette.
+        // Navigation hunk-by-hunk via les actions natives IntelliJ déjà présentes dans
+        // le toolbar du diff (flèches gutter en side-by-side).
+        req.putUserData(
+            com.intellij.diff.util.DiffUserDataKeysEx.CONTEXT_ACTIONS,
+            listOf(
+                AcceptFileDiffAction(project, change.path),
+                RejectFileDiffAction(project, change.path),
+                com.intellij.openapi.actionSystem.Separator.getInstance(),
+                DiffPalettePickerAction()
+            )
+        )
+        return req
     }
 
     // ── Compat avec PromptHistory : ouvre des diffs read-only en popup ────────

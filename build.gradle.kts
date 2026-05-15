@@ -44,6 +44,33 @@ intellijPlatform {
         ideaVersion {
             sinceBuild = "261"
         }
-        changeNotes = "Initial POC version"
+        changeNotes = """
+            <h3>0.1.0</h3>
+            <ul>
+                <li>Session resume from <code>~/.claude/projects/</code> with searchable picker
+                    and "current project only" filter.</li>
+                <li>Permission prompts via <code>--permission-prompt-tool stdio</code> — inline
+                    Allow/Deny cards for Bash and MCP tool requests.</li>
+                <li>MCP servers and tools surfaced in a dedicated menu with status icons
+                    (connected / needs-auth / failed).</li>
+                <li>Skills and slash-commands menu, grouped by type (custom skills vs built-ins).</li>
+                <li>Stop button is now interrupt-only (never sends pending text), works during
+                    tool loops, and falls back to process kill if the interrupt write fails.</li>
+                <li>Model / permission-mode switching via <code>control_request</code>, with
+                    rollback if Claude rejects the change.</li>
+                <li>Effort/Bypass switches now resume the conversation across process respawn
+                    via <code>--resume</code> — no more lost history when changing extended
+                    thinking level.</li>
+                <li>PATH is auto-enriched at spawn (<code>~/.nvm/.../bin</code>, <code>~/.local/bin</code>,
+                    <code>~/.cargo/bin</code>, <code>/opt/homebrew/bin</code>) so MCP servers can
+                    find <code>npx</code>, <code>uvx</code>, etc. even when IntelliJ is launched
+                    from a GUI without a login shell.</li>
+                <li>Plan mode write/edit preview cards.</li>
+                <li>Tool call cards now show file path / command / pattern inline (Read, Edit,
+                    Write, Bash, Grep, WebFetch, Skill, mcp__*) and are expanded by default.</li>
+                <li>Stays on the interactive subscription plan (no <code>-p</code>, no Agent SDK
+                    credit billing — confirmed working with claude 2.1.123).</li>
+            </ul>
+        """.trimIndent()
     }
 }

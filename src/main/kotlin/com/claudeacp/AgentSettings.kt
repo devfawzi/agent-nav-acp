@@ -21,7 +21,22 @@ class AgentSettings : PersistentStateComponent<AgentSettings.State> {
         var npxPath: String = "",
         var opencodePath: String = "",
         /** Path to a JSON file passed to `claude --mcp-config <path>`. Empty = use claude's global config. */
-        var mcpConfigPath: String = ""
+        var mcpConfigPath: String = "",
+        /**
+         * Cache des derniers tools MCP observés par server, persisté entre runs.
+         * Permet à la Settings page d'afficher les tools sans avoir à relancer un claude.
+         * Mis à jour à chaque `system:init` du transport CLI.
+         * Format : "ServerName" -> "tool1,tool2,tool3"
+         */
+        var mcpToolsCacheCsv: MutableMap<String, String> = mutableMapOf(),
+        /**
+         * Si true, à chaque prompt envoyé, on ajoute en fin de message la liste des
+         * errors/warnings du buffer éditeur courant (LSP diagnostics). Style Cursor :
+         * claude voit directement "fix these errors" sans copier/coller.
+         */
+        var injectDiagnostics: Boolean = true,
+        /** Inclure aussi les WARNINGS (sinon ERRORS only). */
+        var injectDiagnosticsIncludeWarnings: Boolean = false
     )
 
     private var state = State()
@@ -55,10 +70,29 @@ class AgentSettings : PersistentStateComponent<AgentSettings.State> {
             state.mcpConfigPath = value
         }
 
+    var injectDiagnostics: Boolean
+        get() = state.injectDiagnostics
+        set(value) { state.injectDiagnostics = value }
+
+    var injectDiagnosticsIncludeWarnings: Boolean
+        get() = state.injectDiagnosticsIncludeWarnings
+        set(value) { state.injectDiagnosticsIncludeWarnings = value }
+
     fun getClaudeCliPathOrNull(): String? = claudeCliPath.takeIf { it.isNotBlank() }
     fun getNpxPathOrNull(): String? = npxPath.takeIf { it.isNotBlank() }
     fun getOpencodePathOrNull(): String? = opencodePath.takeIf { it.isNotBlank() }
     fun getMcpConfigPathOrNull(): String? = mcpConfigPath.takeIf { it.isNotBlank() && java.io.File(it).isFile }
+
+    /** Cache des tools MCP par server (lus depuis le dernier `system:init` reçu). */
+    fun getMcpToolsCache(): Map<String, List<String>> =
+        state.mcpToolsCacheCsv.mapValues { it.value.split(",").filter { t -> t.isNotBlank() } }
+
+    /** Met à jour le cache. Appelé par ClaudeACPService au `system:init`. */
+    fun updateMcpToolsCache(toolsByServer: Map<String, List<String>>) {
+        state.mcpToolsCacheCsv = toolsByServer
+            .mapValues { it.value.joinToString(",") }
+            .toMutableMap()
+    }
 
     companion object {
         fun getInstance(): AgentSettings = service()

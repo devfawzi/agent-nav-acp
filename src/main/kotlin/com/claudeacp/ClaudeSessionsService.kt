@@ -25,18 +25,63 @@ class ClaudeSessionsService(private val project: Project) {
 
     data class SessionInfo(
         val sessionId: String,
+        /** Premier prompt user "humain" (après skip des wrappers system). */
         val firstUserMessage: String,
+        /** Dernier prompt user humain — utile pour savoir où on en était. */
+        val lastUserMessage: String?,
+        /** Date du premier user message humain. */
+        val firstUserAt: Instant?,
+        /** Date du dernier user message humain. */
+        val lastUserAt: Instant?,
+        /** Si claude a généré un type:"summary" dans le .jsonl, on l'utilise comme titre. */
+        val summary: String?,
         val messageCount: Int,
         val lastModified: Instant,
         val sizeBytes: Long,
-        val cwd: String?
+        val cwd: String?,
+        /**
+         * Source de la session : `sdk-cli` = lancée via le plugin (stream-json),
+         * `cli` = claude CLI TUI direct, `sdk-ts` = SDK TypeScript, etc.
+         * Permet de filtrer "uniquement mes chats plugin" dans le picker.
+         */
+        val entrypoint: String?
     ) {
-        fun formattedDate(): String {
-            val formatter = DateTimeFormatter
+        fun formattedDate(): String = formatInstant(lastModified)
+        fun formattedFirstUserAt(): String? = firstUserAt?.let { formatInstant(it) }
+        fun formattedLastUserAt(): String? = lastUserAt?.let { formatInstant(it) }
+
+        companion object {
+            private val FORMATTER = DateTimeFormatter
                 .ofPattern("yyyy-MM-dd HH:mm")
                 .withZone(ZoneId.systemDefault())
-            return formatter.format(lastModified)
+            fun formatInstant(i: Instant): String = FORMATTER.format(i)
         }
+    }
+
+    /**
+     * Préfixes des wrappers système injectés par Claude Code AVANT le vrai prompt user.
+     * On les skippe pour afficher le contenu humain dans le picker, sinon le card devient
+     * `<local-command-caveat>Caveat: ...` au lieu de "fix the bug in MyService.kt".
+     */
+    private val SYSTEM_WRAPPER_PREFIXES = listOf(
+        "<local-command-caveat>",
+        "<local-command-stdout>",
+        "<local-command-stderr>",
+        "<system-reminder>",
+        "<command-name>",
+        "<command-message>",
+        "<command-args>",
+        "<task-notification>",
+        "<bash-stdout>",
+        "<bash-stderr>",
+        "<user-prompt-submit-hook>"
+    )
+
+    /** Renvoie true si le contenu est entièrement constitué de wrappers / system reminders. */
+    private fun isSystemWrapperOnly(text: String): Boolean {
+        val trimmed = text.trimStart()
+        if (trimmed.isEmpty()) return true
+        return SYSTEM_WRAPPER_PREFIXES.any { trimmed.startsWith(it) }
     }
 
     /** Répertoire où Claude Code stocke les sessions du projet courant. */
@@ -97,51 +142,107 @@ class ClaudeSessionsService(private val project: Project) {
     private fun parseSession(file: File): SessionInfo? {
         return try {
             var firstUser: String? = null
+            var firstUserAt: Instant? = null
+            var lastUser: String? = null
+            var lastUserAt: Instant? = null
+            var summary: String? = null
             var messages = 0
             var cwd: String? = null
-            // Lecture ligne par ligne ; on s'arrête dès qu'on a trouvé le 1er user message
-            // (le reste est juste pour le count, mais on peut lire toutes les lignes — les
-            // jsonl restent < 1MB en général).
+            var entrypoint: String? = null
             file.bufferedReader(Charsets.UTF_8).useLines { lines ->
-                for (line in lines) {
-                    if (line.isBlank() || !line.startsWith("{")) continue
+                lines.forEach line@{ line ->
+                    if (line.isBlank() || !line.startsWith("{")) return@line
                     try {
                         val obj = JsonParser.parseString(line).asJsonObject
                         val type = obj.get("type")?.asString
+                        // Claude génère parfois un type:"summary" — c'est le meilleur titre
+                        // possible pour une session, on le prend en priorité.
+                        if (type == "summary" && summary == null) {
+                            summary = obj.get("summary")?.asString
+                                ?: obj.get("text")?.asString
+                        }
                         if (type == "user" || type == "assistant") messages++
-                        if (firstUser == null && type == "user") {
-                            val msg = obj.getAsJsonObject("message")
-                            val content = msg?.get("content")
-                            firstUser = when {
-                                content == null -> null
-                                content.isJsonPrimitive -> content.asString
-                                content.isJsonArray -> content.asJsonArray
-                                    .firstOrNull { it.isJsonObject &&
-                                        it.asJsonObject.get("type")?.asString == "text" }
-                                    ?.asJsonObject?.get("text")?.asString
-                                else -> null
+                        if (type == "user") {
+                            val text = extractUserText(obj) ?: return@line
+                            // Skip les wrappers system pour trouver le vrai prompt humain.
+                            if (isSystemWrapperOnly(text)) return@line
+                            val ts = obj.get("timestamp")?.asString?.let {
+                                runCatching { Instant.parse(it) }.getOrNull()
                             }
+                            if (firstUser == null) {
+                                firstUser = text
+                                firstUserAt = ts
+                            }
+                            lastUser = text
+                            lastUserAt = ts
                         }
                         if (cwd == null) {
                             cwd = obj.get("cwd")?.asString
                         }
+                        if (entrypoint == null) {
+                            entrypoint = obj.get("entrypoint")?.asString
+                        }
                     } catch (_: Exception) { /* skip malformed line */ }
                 }
             }
-            // Sessions sans aucun message user/assistant : probablement vides (queue events
-            // seulement) → on les ignore pour ne pas polluer la liste.
             if (messages == 0) return null
             SessionInfo(
                 sessionId = file.nameWithoutExtension,
                 firstUserMessage = (firstUser ?: "(no user message)").take(200),
+                lastUserMessage = lastUser?.take(200)?.takeIf { it != firstUser?.take(200) },
+                firstUserAt = firstUserAt,
+                lastUserAt = lastUserAt,
+                summary = summary?.take(200),
                 messageCount = messages,
                 lastModified = Instant.ofEpochMilli(file.lastModified()),
                 sizeBytes = file.length(),
-                cwd = cwd
+                cwd = cwd,
+                entrypoint = entrypoint
             )
         } catch (e: Exception) {
             log.warn("Failed to parse session file ${file.name}", e)
             null
+        }
+    }
+
+    /** Supprime le .jsonl correspondant à une session. Retourne true si supprimé. */
+    fun deleteSession(sessionId: String): Boolean {
+        val home = System.getProperty("user.home") ?: return false
+        val root = File("$home/.claude/projects")
+        if (!root.isDirectory) return false
+        var found = false
+        root.listFiles { f -> f.isDirectory }?.forEach { dir ->
+            val candidate = File(dir, "$sessionId.jsonl")
+            if (candidate.isFile) {
+                if (candidate.delete()) {
+                    log.info("Deleted session ${candidate.absolutePath}")
+                    found = true
+                }
+            }
+            // Supprime aussi le dossier `<sid>/` si présent (tool-results storage)
+            val sidDir = File(dir, sessionId)
+            if (sidDir.isDirectory) {
+                sidDir.deleteRecursively()
+            }
+        }
+        return found
+    }
+
+    /** Bulk delete. Retourne le nombre supprimé. */
+    fun deleteSessions(sessionIds: Collection<String>): Int =
+        sessionIds.count { deleteSession(it) }
+
+    /** Extrait le texte d'un user message du .jsonl (content peut être string ou array). */
+    private fun extractUserText(obj: com.google.gson.JsonObject): String? {
+        val msg = obj.getAsJsonObject("message") ?: return null
+        val content = msg.get("content") ?: return null
+        return when {
+            content.isJsonPrimitive -> content.asString
+            content.isJsonArray -> content.asJsonArray
+                .filter { it.isJsonObject && it.asJsonObject.get("type")?.asString == "text" }
+                .joinToString("\n") { it.asJsonObject.get("text")?.asString ?: "" }
+                .ifBlank { null }
+            else -> null
         }
     }
 }

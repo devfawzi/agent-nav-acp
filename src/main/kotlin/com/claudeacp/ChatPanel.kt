@@ -33,6 +33,15 @@ import javax.swing.border.AbstractBorder
  */
 typealias InteractiveReplyHandler = (toolUseId: String, replyText: String, switchModeTo: String?) -> Unit
 
+/** Option clickable dans un SlashPickerCard (slash command /mode /model /effort /skill /mcp). */
+data class SlashPickerOption(
+    val id: String,
+    val label: String,
+    val description: String? = null,
+    val icon: String? = null,
+    val onPick: () -> Unit
+)
+
 class ChatPanel(
     private val project: Project? = null,
     private val interactiveReplyHandler: InteractiveReplyHandler? = null
@@ -197,6 +206,17 @@ class ChatPanel(
     fun appendPermissionRequest(req: ClaudeACPService.PermissionRequest) {
         finalizePending()
         addMessage(PermissionRequestCard(req))
+    }
+
+    /** Affiche un picker interactif pour les slash commands plugin (/mode /model /effort /skill /mcp). */
+    fun appendSlashPicker(
+        title: String,
+        options: List<SlashPickerOption>,
+        currentValueId: String? = null,
+        footer: String? = null
+    ) {
+        finalizePending()
+        addMessage(SlashPickerCard(title, options, currentValueId, footer))
     }
 
     fun appendInfo(text: String) {
@@ -470,7 +490,13 @@ private class FileChangeCard(
 
     private val service = project.getService(PendingChangesService::class.java)
     private val diffManager = project.getService(DiffViewerManager::class.java)
-    private val cardBg = JBColor(Color(0xeeeeee), Color(0x2a2d31))  // gris discret light/dark
+    private val cardBg = JBColor(Color(0xeeeeee), Color(0x2a2d31))
+    private val diffPanel = JPanel(BorderLayout()).apply {
+        background = cardBg
+        border = JBUI.Borders.empty(0, 10, 6, 10)
+        isVisible = false
+    }
+    private var diffRendered = false
 
     init {
         background = cardBg
@@ -481,22 +507,28 @@ private class FileChangeCard(
         val added = countAddedLines(change.before, change.lastSnapshotAfter)
         val removed = countRemovedLines(change.before, change.lastSnapshotAfter)
 
-        // Icône native IntelliJ pour le type de fichier
         val fileType = FileTypeManager.getInstance().getFileTypeByFileName(File(change.path).name)
         val fileIcon = fileType.icon ?: AllIcons.FileTypes.Any_type
 
+        // Le label "+12 −3" est cliquable → expand/collapse du inline diff.
         val label = JLabel(
             "<html><b>$displayName</b>  " +
                 "<span style='color:#4caf50'>+$added</span>  " +
-                "<span style='color:#e53935'>−$removed</span></html>",
+                "<span style='color:#e53935'>−$removed</span>  " +
+                "<span style='color:gray;font-size:10px;'>▸ click to expand</span></html>",
             fileIcon,
             SwingConstants.LEFT
         ).apply {
             font = font.deriveFont(Font.PLAIN, 12f)
             iconTextGap = 6
+            cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
         }
+        label.addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mouseClicked(e: java.awt.event.MouseEvent) = toggleInlineDiff(label, displayName, added, removed, fileIcon)
+        })
 
         val viewBtn = JButton("View").apply {
+            toolTipText = "Open full diff in editor tab"
             margin = JBUI.insets(2, 8)
         }
         val acceptBtn = JButton("✓").apply {
@@ -530,7 +562,6 @@ private class FileChangeCard(
             freeze("rejected")
         }
 
-        // Auto-freeze quand le change disparaît du service (= Accept All / Reject All globaux)
         service.addListener {
             javax.swing.SwingUtilities.invokeLater {
                 if (service.get(change.path) == null && acceptBtn.isEnabled) {
@@ -547,14 +578,246 @@ private class FileChangeCard(
             add(rejectBtn)
         }
 
-        val main = JPanel(BorderLayout()).apply {
+        val header = JPanel(BorderLayout()).apply {
             background = cardBg
             border = JBUI.Borders.empty(4, 10)
             add(label, BorderLayout.CENTER)
             add(actions, BorderLayout.EAST)
         }
 
-        add(main, BorderLayout.CENTER)
+        val stack = JPanel(BorderLayout()).apply {
+            background = cardBg
+            add(header, BorderLayout.NORTH)
+            add(diffPanel, BorderLayout.CENTER)
+        }
+        add(stack, BorderLayout.CENTER)
+    }
+
+    private fun toggleInlineDiff(label: JLabel, displayName: String, added: Int, removed: Int, icon: Icon) {
+        if (!diffRendered) {
+            diffPanel.add(buildInlineDiff(change.before, change.lastSnapshotAfter), BorderLayout.CENTER)
+            diffRendered = true
+        }
+        diffPanel.isVisible = !diffPanel.isVisible
+        val arrow = if (diffPanel.isVisible) "▾" else "▸"
+        val hint = if (diffPanel.isVisible) "click to collapse" else "click to expand"
+        label.text = "<html><b>$displayName</b>  " +
+            "<span style='color:#4caf50'>+$added</span>  " +
+            "<span style='color:#e53935'>−$removed</span>  " +
+            "<span style='color:gray;font-size:10px;'>$arrow $hint</span></html>"
+        revalidate()
+        repaint()
+    }
+
+    private fun buildInlineDiff(before: String, after: String): JComponent {
+        val beforeLines = before.split("\n")
+        val afterLines = after.split("\n")
+        val ops = lineDiff(beforeLines, afterLines)
+        val hunks = groupIntoHunks(ops)
+
+        val container = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            background = cardBg
+        }
+
+        if (hunks.none { it.hasChanges }) {
+            container.add(JLabel("<html><span style='color:gray;'>(no textual differences)</span></html>"))
+            return container
+        }
+
+        val checkboxes = mutableListOf<Pair<JCheckBox, Hunk>>()
+        var totalShown = 0
+        val maxLines = 400
+
+        hunks.forEachIndexed { idx, hunk ->
+            if (totalShown >= maxLines) return@forEachIndexed
+            val hunkPanel = renderHunk(hunk, idx, totalShown >= maxLines - 30)
+            totalShown += hunk.ops.size
+            checkboxes += hunkPanel.checkbox to hunk
+            container.add(hunkPanel.panel)
+            container.add(Box.createVerticalStrut(2))
+        }
+
+        // Actions hunk-by-hunk : Apply selected / Apply all / Reject all
+        val applySelected = JButton("Apply selected hunks").apply {
+            toolTipText = "Write a version of the file with only the checked hunks (others reverted to before)."
+            margin = JBUI.insets(2, 8)
+            addActionListener { applyHunks(checkboxes, hunks, before, after) }
+        }
+        val applyAll = JButton("Apply all").apply {
+            margin = JBUI.insets(2, 8)
+            addActionListener {
+                checkboxes.forEach { it.first.isSelected = true }
+                service.accept(change.path)
+            }
+        }
+        val rejectAll = JButton("Reject all").apply {
+            margin = JBUI.insets(2, 8)
+            addActionListener { service.reject(change.path) }
+        }
+
+        val actions = JPanel(FlowLayout(FlowLayout.LEFT, 6, 4)).apply {
+            background = cardBg
+            border = JBUI.Borders.empty(6, 0, 0, 0)
+            add(applySelected)
+            add(applyAll)
+            add(rejectAll)
+        }
+        container.add(actions)
+
+        if (totalShown >= maxLines) {
+            container.add(JLabel("<html><span style='color:gray;'>… diff truncated. Use <b>View</b> for the full IntelliJ diff viewer.</span></html>"))
+        }
+
+        return container
+    }
+
+    private data class Hunk(val ops: List<DiffOp>, val hasChanges: Boolean)
+    private data class HunkPanel(val panel: JComponent, val checkbox: JCheckBox)
+
+    /**
+     * Regroupe la séquence d'ops en "hunks" : un hunk = bloc contigu d'ADD/DEL entouré
+     * de contexte. Les CTX entre 2 changes sont attachés au hunk précédent (jusqu'à
+     * 3 lignes de contexte par buffer).
+     */
+    private fun groupIntoHunks(ops: List<DiffOp>): List<Hunk> {
+        val result = mutableListOf<Hunk>()
+        val current = mutableListOf<DiffOp>()
+        var seenChange = false
+        var contextBuffer = mutableListOf<DiffOp>()
+        for (op in ops) {
+            when (op.kind) {
+                DiffKind.CTX -> {
+                    if (!seenChange) {
+                        // Contexte avant un change : on garde les 3 dernières lignes
+                        contextBuffer.add(op)
+                        if (contextBuffer.size > 3) contextBuffer.removeAt(0)
+                    } else {
+                        current.add(op)
+                        // 3 CTX consécutives = fin de hunk
+                        val trailing = current.takeLast(3).count { it.kind == DiffKind.CTX }
+                        if (trailing >= 3) {
+                            result.add(Hunk(current.toList(), true))
+                            current.clear()
+                            seenChange = false
+                            contextBuffer = mutableListOf(op)  // reset avec le dernier ctx
+                        }
+                    }
+                }
+                else -> {
+                    if (!seenChange) {
+                        current.addAll(contextBuffer)
+                        contextBuffer.clear()
+                        seenChange = true
+                    }
+                    current.add(op)
+                }
+            }
+        }
+        if (current.isNotEmpty()) result.add(Hunk(current.toList(), seenChange))
+        if (result.isEmpty()) result.add(Hunk(emptyList(), false))
+        return result
+    }
+
+    private fun renderHunk(hunk: Hunk, index: Int, truncated: Boolean): HunkPanel {
+        val checkbox = JCheckBox("hunk #${index + 1}", true).apply {
+            font = font.deriveFont(Font.PLAIN, 10f)
+            foreground = JBColor.GRAY
+            isOpaque = false
+            border = JBUI.Borders.emptyRight(8)
+        }
+
+        val sb = StringBuilder("<html><body style='font-family:monospaced;font-size:11px;'>")
+        for (op in hunk.ops) {
+            val text = op.text
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace(" ", "&nbsp;")
+                .ifEmpty { "&nbsp;" }
+            // Couleurs voyantes (sat plus haut, contraste clair sur les 2 themes)
+            val (bg, fg, prefix) = when (op.kind) {
+                DiffKind.ADD -> Triple("#1e4d2b", "#b9f5c1", "+")
+                DiffKind.DEL -> Triple("#5a1e1e", "#ffb4b4", "−")
+                DiffKind.CTX -> Triple("transparent", "#9aa0a6", "&nbsp;")
+            }
+            sb.append("<div style='background:$bg;color:$fg;padding:0 4px;'>")
+                .append("<span style='display:inline-block;width:1.2em;'>$prefix</span>")
+                .append(text)
+                .append("</div>")
+        }
+        sb.append("</body></html>")
+        val pane = JEditorPane().apply {
+            contentType = "text/html"
+            isEditable = false
+            text = sb.toString()
+            background = cardBg
+            border = JBUI.Borders.empty(2, 0)
+            putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
+        }
+        val wrapper = JPanel(BorderLayout()).apply {
+            background = cardBg
+            add(JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
+                background = cardBg
+                add(checkbox)
+            }, BorderLayout.NORTH)
+            add(pane, BorderLayout.CENTER)
+            if (truncated) {
+                add(JLabel("<html><span style='color:gray;font-size:10px;'>(more lines below truncated)</span></html>"), BorderLayout.SOUTH)
+            }
+            border = JBUI.Borders.customLine(JBColor(Color(0xd0d7e2), Color(0x2d3a4d)), 1)
+        }
+        return HunkPanel(wrapper, checkbox)
+    }
+
+    /**
+     * Construit le contenu reconstructé en appliquant uniquement les hunks cochés. Les hunks
+     * décochés sont "revertis" (= on garde l'état before pour leurs lignes). Écrit sur disque
+     * via PendingChangesService.applyPartial.
+     */
+    private fun applyHunks(
+        checkboxes: List<Pair<JCheckBox, Hunk>>,
+        @Suppress("UNUSED_PARAMETER") allHunks: List<Hunk>,
+        before: String,
+        after: String
+    ) {
+        val keepAll = checkboxes.all { it.first.isSelected }
+        val keepNone = checkboxes.none { it.first.isSelected }
+        when {
+            keepAll -> service.accept(change.path)
+            keepNone -> service.reject(change.path)
+            else -> {
+                // Reconstruction : on rejoue les ops dans l'ordre, en remplaçant chaque hunk
+                // décoché par sa version "before only" (les DEL deviennent des CTX, les ADD
+                // sautées).
+                val result = StringBuilder()
+                var first = true
+                fun appendLine(text: String) {
+                    if (!first) result.append('\n')
+                    result.append(text)
+                    first = false
+                }
+                for ((cb, hunk) in checkboxes) {
+                    val keep = cb.isSelected
+                    for (op in hunk.ops) {
+                        when (op.kind) {
+                            DiffKind.CTX -> appendLine(op.text)
+                            DiffKind.ADD -> if (keep) appendLine(op.text)
+                            DiffKind.DEL -> if (!keep) appendLine(op.text)
+                        }
+                    }
+                }
+                // Note : si une session a un seul gros hunk on retombe sur accept/reject
+                // (juste plus haut). Ce path est pour les cas multi-hunk.
+                val rebuilt = result.toString()
+                // Sanity check : si la reconstruction match before ou after, on simplifie.
+                when (rebuilt) {
+                    before -> service.reject(change.path)
+                    after -> service.accept(change.path)
+                    else -> service.applyPartial(change.path, rebuilt)
+                }
+            }
+        }
     }
 
     override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
@@ -574,6 +837,38 @@ private class FileChangeCard(
     private fun countRemovedLines(before: String, after: String): Int {
         val afterLines = after.split("\n").toSet()
         return before.split("\n").count { it.isNotEmpty() && it !in afterLines }
+    }
+
+    private enum class DiffKind { ADD, DEL, CTX }
+    private data class DiffOp(val kind: DiffKind, val text: String)
+
+    /**
+     * Diff naïf line-by-line basé sur LCS. Pour des fichiers > 5000 lignes ça devient lent
+     * (O(n*m)), on rabat sur un diff "all-add vs all-del" dans ce cas. Suffisant pour les
+     * diffs de claude qui restent généralement petits.
+     */
+    private fun lineDiff(a: List<String>, b: List<String>): List<DiffOp> {
+        if (a.size * b.size > 2_000_000) {
+            return a.map { DiffOp(DiffKind.DEL, it) } + b.map { DiffOp(DiffKind.ADD, it) }
+        }
+        val n = a.size; val m = b.size
+        val dp = Array(n + 1) { IntArray(m + 1) }
+        for (i in n - 1 downTo 0) for (j in m - 1 downTo 0) {
+            dp[i][j] = if (a[i] == b[j]) dp[i + 1][j + 1] + 1
+            else maxOf(dp[i + 1][j], dp[i][j + 1])
+        }
+        val ops = mutableListOf<DiffOp>()
+        var i = 0; var j = 0
+        while (i < n && j < m) {
+            when {
+                a[i] == b[j] -> { ops += DiffOp(DiffKind.CTX, a[i]); i++; j++ }
+                dp[i + 1][j] >= dp[i][j + 1] -> { ops += DiffOp(DiffKind.DEL, a[i]); i++ }
+                else -> { ops += DiffOp(DiffKind.ADD, b[j]); j++ }
+            }
+        }
+        while (i < n) { ops += DiffOp(DiffKind.DEL, a[i]); i++ }
+        while (j < m) { ops += DiffOp(DiffKind.ADD, b[j]); j++ }
+        return ops
     }
 }
 
@@ -1076,6 +1371,100 @@ private class PermissionRequestCard(
         allowBtn.isEnabled = false
         denyBtn.isEnabled = false
         statusLabel.text = message
+    }
+
+    override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
+}
+
+/**
+ * Card interactive affichée dans le chat quand l'user tape une slash command plugin
+ * (/mode /model /effort /skill /mcp). Liste cliquable des options. Une fois choisi,
+ * la card se "verrouille" en affichant le choix (pour conserver la trace dans le scroll).
+ */
+private class SlashPickerCard(
+    title: String,
+    options: List<SlashPickerOption>,
+    currentValueId: String?,
+    footer: String?
+) : JPanel(BorderLayout()) {
+
+    private val cardBg = JBColor(Color(0xeaf3ff), Color(0x1f2d3d))
+    private val borderColor = JBColor(Color(0x5b89d9), Color(0x4a6fa5))
+    private val statusLabel = JLabel("").apply {
+        font = font.deriveFont(Font.ITALIC, 11f)
+        foreground = JBColor.GRAY
+        border = JBUI.Borders.empty(2, 8, 0, 0)
+    }
+    @Volatile private var done = false
+
+    init {
+        background = cardBg
+        border = RoundedBorder(borderColor, 8)
+        alignmentX = Component.LEFT_ALIGNMENT
+
+        val titleLabel = JLabel("<html><b>$title</b></html>").apply {
+            font = font.deriveFont(Font.PLAIN, 12f)
+            border = JBUI.Borders.empty(6, 10, 4, 10)
+        }
+
+        val body = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            background = cardBg
+            border = JBUI.Borders.empty(0, 10, 6, 10)
+        }
+        if (options.isEmpty()) {
+            body.add(JLabel("<html><span style='color:gray;font-style:italic;'>" +
+                "(no option available — Claude hasn't sent the list yet)</span></html>"))
+        } else {
+            options.forEach { opt ->
+                val isCurrent = opt.id == currentValueId
+                val checkMark = if (isCurrent) " ✓" else ""
+                val descHtml = opt.description?.let {
+                    "<br><span style='color:gray;font-size:10px;'>$it</span>"
+                } ?: ""
+                val iconPrefix = opt.icon?.let { "$it " } ?: ""
+                val labelHtml = "<html>$iconPrefix<b>${opt.label}$checkMark</b>$descHtml</html>"
+
+                val btn = JButton(labelHtml).apply {
+                    horizontalAlignment = SwingConstants.LEFT
+                    margin = JBUI.insets(4, 8)
+                    isFocusPainted = false
+                    isContentAreaFilled = false
+                    border = JBUI.Borders.compound(
+                        JBUI.Borders.customLine(JBColor(Color(0xd0d7e2), Color(0x2d3a4d)), 1),
+                        JBUI.Borders.empty(2, 4)
+                    )
+                    alignmentX = Component.LEFT_ALIGNMENT
+                    maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height + 4)
+                }
+                btn.addActionListener {
+                    if (done) return@addActionListener
+                    done = true
+                    options.forEach { o -> }  // placeholder
+                    body.components.filterIsInstance<JButton>().forEach { it.isEnabled = false }
+                    statusLabel.text = "✓ ${opt.label}"
+                    opt.onPick()
+                }
+                body.add(btn)
+                body.add(Box.createVerticalStrut(2))
+            }
+        }
+
+        val center = JPanel(BorderLayout()).apply {
+            background = cardBg
+            add(titleLabel, BorderLayout.NORTH)
+            add(body, BorderLayout.CENTER)
+            if (footer != null || true) {
+                val footerPanel = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
+                    background = cardBg
+                    border = JBUI.Borders.empty(0, 10, 6, 10)
+                    if (footer != null) add(JLabel("<html><span style='color:gray;font-size:10px;'>$footer</span></html>"))
+                    add(statusLabel)
+                }
+                add(footerPanel, BorderLayout.SOUTH)
+            }
+        }
+        add(center, BorderLayout.CENTER)
     }
 
     override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)

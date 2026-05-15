@@ -32,6 +32,8 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
     private val npxField = TextFieldWithBrowseButton()
     private val opencodeField = TextFieldWithBrowseButton()
     private val mcpConfigField = TextFieldWithBrowseButton()
+    private val injectDiagnosticsCheck = JCheckBox("Auto-inject editor errors/warnings into prompts")
+    private val includeWarningsCheck = JCheckBox("Include warnings (not just errors)")
     private val claudeDetectedLabel = JBLabel("")
     private val npxDetectedLabel = JBLabel("")
     private val opencodeDetectedLabel = JBLabel("")
@@ -39,6 +41,13 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
 
     private val profilesListModel = DefaultListModel<AgentProfile>()
     private val profilesList = JBList(profilesListModel)
+
+    /** Inventaire des MCP : liste verticale "ServerName · type · N tools" + expand des tools. */
+    private val mcpInventoryPanel = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        background = com.intellij.util.ui.UIUtil.getPanelBackground()
+        border = JBUI.Borders.empty(4)
+    }
 
     init {
         claudeField.addBrowseFolderListener(
@@ -115,6 +124,27 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
             }
             row("MCP config file:") { cell(mcpConfigField).align(AlignX.FILL) }
             row("") { cell(mcpConfigStatusLabel) }
+            row {
+                cell(JBScrollPane(mcpInventoryPanel).apply {
+                    preferredSize = Dimension(0, 240)
+                    border = JBUI.Borders.customLine(com.intellij.ui.JBColor.border(), 1)
+                }).align(AlignX.FILL)
+            }
+            row {
+                button("Refresh inventory") { refreshMcpInventory() }
+                comment("Servers come from your <code>--mcp-config</code> file. Tools are cached from the last Claude session (sent your 1st prompt yet).")
+            }
+        }
+        group("Editor context injection") {
+            row {
+                text(
+                    "When sending a prompt, automatically append the list of errors/warnings " +
+                        "from the currently focused editor (LSP/inspections) — Claude sees them " +
+                        "without you copy-pasting. Style: Cursor."
+                )
+            }
+            row { cell(injectDiagnosticsCheck) }
+            row { cell(includeWarningsCheck) }
         }
         group("Binaries auto-discovery") {
             row {
@@ -140,16 +170,124 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
         npxField.text = binarySettings.npxPath
         opencodeField.text = binarySettings.opencodePath
         mcpConfigField.text = binarySettings.mcpConfigPath
+        injectDiagnosticsCheck.isSelected = binarySettings.injectDiagnostics
+        includeWarningsCheck.isSelected = binarySettings.injectDiagnosticsIncludeWarnings
         refreshDetectedLabels()
         refreshMcpStatus()
+        refreshMcpInventory()
         refreshProfilesList()
+    }
+
+    /**
+     * Liste les MCP servers du fichier --mcp-config (parsing JSON minimal) et combine avec
+     * les tools cachés depuis le dernier `system:init` reçu. Affiche dans un panel scrollable
+     * avec un row par server : nom + type + N tools + un toggle pour voir la liste détaillée.
+     */
+    private fun refreshMcpInventory() {
+        mcpInventoryPanel.removeAll()
+        val configPath = mcpConfigField.text.trim().ifEmpty { binarySettings.mcpConfigPath }
+        val servers = parseMcpConfigServers(configPath)
+        val toolsCache = binarySettings.getMcpToolsCache()
+
+        if (servers.isEmpty()) {
+            mcpInventoryPanel.add(JBLabel(
+                "<html><span style='color:gray;font-style:italic;'>" +
+                    "No <code>mcpServers</code> found in the configured file. Set the path above and " +
+                    "make sure it has a <code>{\"mcpServers\": {...}}</code> root." +
+                    "</span></html>"
+            ).apply { border = JBUI.Borders.empty(10) })
+            mcpInventoryPanel.revalidate()
+            mcpInventoryPanel.repaint()
+            return
+        }
+
+        servers.forEach { srv ->
+            // claude normalise les noms : "claude.ai Gmail" → "claude_ai_Gmail" pour les tools
+            val normalized = srv.name.replace(Regex("[^A-Za-z0-9]"), "_")
+            val tools = toolsCache[srv.name] ?: toolsCache[normalized] ?: emptyList()
+            mcpInventoryPanel.add(buildMcpServerRow(srv, tools))
+            mcpInventoryPanel.add(Box.createVerticalStrut(4))
+        }
+        mcpInventoryPanel.revalidate()
+        mcpInventoryPanel.repaint()
+    }
+
+    private data class McpServerEntry(val name: String, val type: String, val target: String)
+
+    private fun parseMcpConfigServers(path: String): List<McpServerEntry> {
+        if (path.isBlank() || !java.io.File(path).isFile) return emptyList()
+        return try {
+            val content = java.io.File(path).readText(Charsets.UTF_8)
+            val root = com.google.gson.JsonParser.parseString(content).asJsonObject
+            val servers = root.getAsJsonObject("mcpServers") ?: return emptyList()
+            servers.entrySet().mapNotNull { (name, valEl) ->
+                if (!valEl.isJsonObject) return@mapNotNull null
+                val obj = valEl.asJsonObject
+                val type = obj.get("type")?.asString
+                    ?: if (obj.has("url")) "http" else "stdio"
+                val target = when {
+                    obj.has("url") -> obj.get("url").asString
+                    obj.has("command") -> {
+                        val cmd = obj.get("command").asString
+                        val args = obj.getAsJsonArray("args")?.joinToString(" ") { it.asString } ?: ""
+                        "$cmd $args".trim()
+                    }
+                    else -> "(unknown)"
+                }
+                McpServerEntry(name, type, target)
+            }.sortedBy { it.name.lowercase() }
+        } catch (e: Exception) {
+            listOf(McpServerEntry("(parse error)", "?", e.message?.take(80) ?: "?"))
+        }
+    }
+
+    private fun buildMcpServerRow(srv: McpServerEntry, tools: List<String>): JComponent {
+        val card = JPanel(BorderLayout()).apply {
+            background = com.intellij.util.ui.UIUtil.getTextFieldBackground()
+            border = JBUI.Borders.compound(
+                JBUI.Borders.customLine(com.intellij.ui.JBColor.border(), 1),
+                JBUI.Borders.empty(6, 10)
+            )
+            maximumSize = Dimension(Int.MAX_VALUE, if (tools.isEmpty()) 50 else 120)
+        }
+        val typeIcon = when (srv.type) {
+            "http", "sse" -> "🌐"
+            "stdio" -> "📥"
+            else -> "🔌"
+        }
+        val toolCount = if (tools.isEmpty()) "(no tools cached yet)" else "${tools.size} tool(s)"
+        val header = JBLabel(
+            "<html><b>$typeIcon ${srv.name}</b>  " +
+                "<span style='color:gray;font-size:10px;'>${srv.type} · $toolCount</span><br>" +
+                "<span style='color:gray;font-size:10px;'>${srv.target}</span></html>"
+        )
+        card.add(header, BorderLayout.NORTH)
+
+        if (tools.isNotEmpty()) {
+            val toolsHtml = tools.sorted().joinToString("<br>") {
+                "<code>$it</code>"
+            }
+            val pane = JTextPane().apply {
+                contentType = "text/html"
+                isEditable = false
+                isFocusable = true
+                background = com.intellij.util.ui.UIUtil.getTextFieldBackground()
+                text = "<html><body style='font-family:monospaced;font-size:11px;color:#5b89d9;padding-top:4px;'>" +
+                    toolsHtml + "</body></html>"
+                border = JBUI.Borders.empty(4, 16, 0, 0)
+            }
+            card.add(pane, BorderLayout.CENTER)
+        }
+        return card
     }
 
     override fun isModified(): Boolean {
         return claudeField.text != binarySettings.claudeCliPath ||
             npxField.text != binarySettings.npxPath ||
             opencodeField.text != binarySettings.opencodePath ||
-            mcpConfigField.text != binarySettings.mcpConfigPath
+            mcpConfigField.text != binarySettings.mcpConfigPath ||
+            injectDiagnosticsCheck.isSelected != binarySettings.injectDiagnostics ||
+            includeWarningsCheck.isSelected != binarySettings.injectDiagnosticsIncludeWarnings
     }
 
     override fun apply() {
@@ -157,6 +295,8 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
         binarySettings.npxPath = npxField.text.trim()
         binarySettings.opencodePath = opencodeField.text.trim()
         binarySettings.mcpConfigPath = mcpConfigField.text.trim()
+        binarySettings.injectDiagnostics = injectDiagnosticsCheck.isSelected
+        binarySettings.injectDiagnosticsIncludeWarnings = includeWarningsCheck.isSelected
         refreshDetectedLabels()
         refreshMcpStatus()
     }

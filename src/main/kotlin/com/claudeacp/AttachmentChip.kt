@@ -29,7 +29,7 @@ class AttachmentChip(
     init {
         background = UIUtil.getTextFieldBackground()
         border = AttachmentBorder()
-        maximumSize = Dimension(220, 28)
+        maximumSize = Dimension(260, 28)
 
         val icon = JLabel(iconFor(attachment)).apply {
             border = JBUI.Borders.empty(0, 4, 0, 4)
@@ -40,6 +40,11 @@ class AttachmentChip(
             toolTipText = when (attachment) {
                 is PromptAttachment.FileLink -> attachment.absolutePath
                 is PromptAttachment.Image -> attachment.displayName
+                is PromptAttachment.CodeRef -> "<html>${attachment.absolutePath}:${attachment.lineRange}<br><br>" +
+                    "<pre style='font-family:monospaced;font-size:10px;'>" +
+                    attachment.content.take(600).replace("<", "&lt;").replace(">", "&gt;") +
+                    (if (attachment.content.length > 600) "\n…" else "") +
+                    "</pre></html>"
             }
         }
         val close = JLabel("×").apply {
@@ -73,6 +78,7 @@ class AttachmentChip(
                 AllIcons.FileTypes.Image
             }
             is PromptAttachment.FileLink -> AllIcons.FileTypes.Any_type
+            is PromptAttachment.CodeRef -> AllIcons.Actions.ShowAsTree
         }
     }
 }

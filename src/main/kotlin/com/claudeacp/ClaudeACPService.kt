@@ -79,6 +79,30 @@ class ClaudeACPService(private val project: Project) {
 
     fun addToolResultErrorListener(l: (String, String?) -> Unit) { toolResultErrorListeners.add(l) }
 
+    /**
+     * Usage cumulé par session : tokens input/output et coût $. Mis à jour à chaque event
+     * `result` reçu de claude. Permet d'afficher un indicateur discret dans le header.
+     */
+    data class UsageStats(
+        val inputTokens: Long = 0,
+        val outputTokens: Long = 0,
+        val cacheReadTokens: Long = 0,
+        val cacheCreationTokens: Long = 0,
+        val totalCostUsd: Double = 0.0,
+        val turnCount: Int = 0
+    ) {
+        val totalTokens: Long get() = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens
+    }
+
+    private val sessionUsage = ConcurrentHashMap<String, UsageStats>()
+    private val usageListeners = mutableListOf<(sessionId: String, UsageStats) -> Unit>()
+
+    fun getSessionUsage(sid: String?): UsageStats =
+        sid?.let { sessionUsage[it] } ?: UsageStats()
+
+    fun addUsageListener(l: (String, UsageStats) -> Unit) { usageListeners.add(l) }
+    fun removeUsageListener(l: (String, UsageStats) -> Unit) { usageListeners.remove(l) }
+
     /** Config par session (chaque chat a son propre sessionConfig). */
     private val sessionConfigs = ConcurrentHashMap<String, SessionConfig>()
 
@@ -129,6 +153,11 @@ class ClaudeACPService(private val project: Project) {
     )
 
     data class McpServerInfo(val name: String, val status: String)
+
+    /** Chemins de mémoire auto chargés par claude (exposé dans system:init.memory_paths). */
+    @Volatile
+    var lastMemoryPaths: Map<String, String> = emptyMap()
+        private set
 
     data class ConfigOption(
         val id: String,
@@ -592,6 +621,13 @@ class ClaudeACPService(private val project: Project) {
                         """{"type":"image","data":${escapeJson(att.base64Data)},"mimeType":${escapeJson(att.mimeType)}}"""
                     )
                 }
+                is PromptAttachment.CodeRef -> {
+                    // ACP n'a pas de type code natif → on en fait un bloc texte avec contexte.
+                    val lang = att.language.orEmpty()
+                    val block = "\n[Code reference from ${att.absolutePath}:${att.lineRange}]\n" +
+                        "```$lang\n${att.content}\n```\n"
+                    parts.add("""{"type":"text","text":${escapeJson(block)}}""")
+                }
             }
         }
         val promptArray = parts.joinToString(",", prefix = "[", postfix = "]")
@@ -887,9 +923,9 @@ class ClaudeACPService(private val project: Project) {
     }
 
     private fun setState(newState: State) {
+        val previous = state
         state = newState
-        // Snapshot pour éviter ConcurrentModificationException si un listener
-        // s'auto-désabonne ou ajoute un autre listener pendant l'itération.
+        PluginLogService.getInstance(project).info("state", "$previous → $newState")
         stateListeners.toList().forEach { it(newState) }
     }
 
@@ -1667,11 +1703,14 @@ class ClaudeACPService(private val project: Project) {
                 ?: "unknown error"
         } else null
 
+        val logSvc = PluginLogService.getInstance(project)
         if (isError) {
             log.warn("CLI control_response error for $requestId: $errMsg")
+            logSvc.error("control_response", "req=$requestId error=$errMsg")
             notifyError("Setting change failed: $errMsg")
         } else {
             log.info("CLI control_response OK for $requestId")
+            logSvc.info("control_response", "req=$requestId OK")
         }
 
         // Déclenche le callback de rollback/success enregistré au moment de l'envoi.
@@ -1739,8 +1778,28 @@ class ClaudeACPService(private val project: Project) {
         // que claude peut invoquer côté MCP — distinct des tools natifs Bash/Read/Edit/...
         val mcpTools = json.getAsJsonArray("tools")?.mapNotNull { it.asString }
             ?.filter { it.startsWith("mcp__") }.orEmpty()
+        // Update le cache app-level pour que Settings → MCP puisse afficher la liste des tools
+        // par server sans avoir besoin de relancer claude.
+        val toolsByServer = mcpTools
+            .mapNotNull { full ->
+                val rest = full.removePrefix("mcp__")
+                val server = rest.substringBefore("__")
+                val action = rest.substringAfter("__", "")
+                if (server.isEmpty() || action.isEmpty()) null else server to action
+            }
+            .groupBy({ it.first }, { it.second })
+        if (toolsByServer.isNotEmpty()) {
+            AgentSettings.getInstance().updateMcpToolsCache(toolsByServer)
+        }
         // Skills isolés (slashCommands marqués skill par claude, claude_code 2.1+).
         val skills = json.getAsJsonArray("skills")?.mapNotNull { it.asString }.orEmpty()
+        // Memory paths : où claude charge sa mémoire auto. Permet à l'UI d'exposer un inspector.
+        val memoryPathsObj = json.getAsJsonObject("memory_paths")
+        if (memoryPathsObj != null) {
+            lastMemoryPaths = memoryPathsObj.entrySet().associate { (k, v) ->
+                k to (v.asString ?: "")
+            }
+        }
         val config = SessionConfig(
             models = CLAUDE_MODELS,
             modes = CLAUDE_PERMISSION_MODES,
@@ -1835,6 +1894,25 @@ class ClaudeACPService(private val project: Project) {
         proc.executingSessionId = null
         if (currentExecutingSessionId == sid) {
             setExecuting(false)
+        }
+        // Update usage stats (cumulative across turns) — utilisé par l'indicateur header.
+        if (sid != null) {
+            val usage = json.getAsJsonObject("usage")
+            val cost = json.get("total_cost_usd")?.let {
+                runCatching { it.asDouble }.getOrNull()
+            } ?: 0.0
+            val current = sessionUsage[sid] ?: UsageStats()
+            val newStats = current.copy(
+                inputTokens = current.inputTokens + (usage?.get("input_tokens")?.asLong ?: 0L),
+                outputTokens = current.outputTokens + (usage?.get("output_tokens")?.asLong ?: 0L),
+                cacheReadTokens = current.cacheReadTokens + (usage?.get("cache_read_input_tokens")?.asLong ?: 0L),
+                cacheCreationTokens = current.cacheCreationTokens + (usage?.get("cache_creation_input_tokens")?.asLong ?: 0L),
+                // total_cost_usd dans l'event result est CUMULÉ pour la session, donc on remplace
+                totalCostUsd = cost.takeIf { it > current.totalCostUsd } ?: current.totalCostUsd,
+                turnCount = current.turnCount + 1
+            )
+            sessionUsage[sid] = newStats
+            usageListeners.toList().forEach { it(sid, newStats) }
         }
         val isError = json.get("is_error")?.asBoolean ?: false
         if (isError) {
@@ -2058,6 +2136,23 @@ class ClaudeACPService(private val project: Project) {
                 is PromptAttachment.FileLink -> {
                     // Claude lit les fichiers via Read tool ; on injecte @path dans le texte.
                     contentArr.add("""{"type":"text","text":${escapeJson(" @${att.absolutePath}")}}""")
+                }
+                is PromptAttachment.CodeRef -> {
+                    // Bloc texte enrichi : chemin + lignes + fenced code block langage-aware.
+                    // Format inspiré de Cursor pour qu'on identifie immédiatement le fragment.
+                    val lang = att.language.orEmpty()
+                    val block = buildString {
+                        append("\n[Code reference from ")
+                        append(att.absolutePath)
+                        append(":")
+                        append(att.lineRange)
+                        append("]\n```")
+                        append(lang)
+                        append("\n")
+                        append(att.content)
+                        append("\n```\n")
+                    }
+                    contentArr.add("""{"type":"text","text":${escapeJson(block)}}""")
                 }
             }
         }

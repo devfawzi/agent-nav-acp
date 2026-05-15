@@ -4,17 +4,55 @@
     <vendor email="you@example.com" url="https://github.com/devfawzi/agent-nav-acp">DevFawzi</vendor>
 
     <description><![CDATA[
-        <h2>AgentNav ACP</h2>
-        <p>Plugin IntelliJ qui intègre Claude Code dans l'IDE via le protocole ACP
-        (Agent Client Protocol). Inspiré de Cursor avec une UX adaptée à JetBrains.</p>
+        <h2>AgentNav ACP — Cursor-style coding agent for JetBrains IDEs</h2>
+
+        <p>Brings <b>Claude Code</b> straight into IntelliJ as a fully interactive coding agent,
+        with native diff review, multi-tab chats, MCP servers, skills, and session resume —
+        without ever leaving your IDE. Works with your existing Claude subscription plan
+        (no API key, no extra billing).</p>
+
+        <h3>Highlights</h3>
         <ul>
-            <li>Chat multi-sessions avec rendu Markdown</li>
-            <li>Diff viewer natif auto-ouvert à chaque modification</li>
-            <li>Liste Pending Changes avec Accept/Reject par fichier ou globaux</li>
-            <li>Bloc Thinking repliable + Cards file changes + Run command Running/Done</li>
-            <li>Auto-discovery des binaires claude/npx, override via Settings</li>
+            <li><b>Multi-tab chats</b> — every conversation gets its own isolated Claude
+                process. New, rename, and close tabs from the tool window.</li>
+            <li><b>Resume previous sessions</b> — pick any past Claude conversation from disk
+                (across all projects), with search and "current project only" filter.</li>
+            <li><b>Native IntelliJ diff viewer</b> auto-opens on every file change. Accept or
+                Reject per-file, or in batch from the Pending Changes panel.</li>
+            <li><b>In-place model / permission-mode / effort switching</b> — change Opus ↔
+                Sonnet ↔ Haiku, acceptEdits/plan/bypass, Low/Medium/High/Max thinking, all
+                from the input toolbar without losing your conversation history.</li>
+            <li><b>Plan mode preview</b> — when Claude proposes file changes in plan mode,
+                a yellow preview card lets you open the proposed content as a virtual
+                scratch file before approving.</li>
+            <li><b>Permission prompts</b> — Bash/MCP tool requests surface as Allow/Deny
+                cards inline in the chat (via <code>--permission-prompt-tool stdio</code>).</li>
+            <li><b>MCP integration</b> — connected servers and their tools listed in a
+                dedicated menu, with status icons (🟢 connected · 🔑 needs-auth · ❌ failed).
+                Custom <code>--mcp-config</code> path configurable in Settings.</li>
+            <li><b>Skills & slash commands</b> — Claude Code skills (built-in and custom)
+                appear in a dedicated dropdown, grouped by type.</li>
+            <li><b>Prompt history</b> per session with prompt-to-prompt and prompt-to-current
+                diff comparisons.</li>
+            <li><b>Drag &amp; drop files</b> · <b>paste images</b> · <b>@-mention</b> any
+                file in the project.</li>
+            <li><b>Pluggable transport</b> — Claude Code via native CLI <code>stream-json</code>
+                (stays on your subscription plan, no Agent SDK billing), or OpenCode / any
+                ACP-compatible agent via the standard ACP protocol.</li>
         </ul>
+
+        <h3>Requirements</h3>
+        <ul>
+            <li>Claude Code CLI installed (<code>curl -fsSL https://claude.ai/install.sh | bash</code>),
+                signed in once via <code>claude</code>.</li>
+            <li>Optional: <code>npx</code> in PATH (auto-detected from nvm/volta) for OpenCode
+                and MCP servers spawned via npm.</li>
+        </ul>
+
+        <p>Open <i>Tools → AgentNav ACP</i> for settings, or use the tool window on the
+        right after install.</p>
     ]]></description>
+
 
     <dependencies>
         <plugin id="com.intellij.modules.platform"/>
@@ -32,8 +70,10 @@
         <projectService serviceImplementation="com.claudeacp.PromptHistoryService"/>
         <projectService serviceImplementation="com.claudeacp.PendingChangesService"/>
         <projectService serviceImplementation="com.claudeacp.DiffViewerManager"/>
+        <projectService serviceImplementation="com.claudeacp.PluginLogService"/>
         <applicationService serviceImplementation="com.claudeacp.AgentSettings"/>
         <applicationService serviceImplementation="com.claudeacp.AgentProfilesService"/>
+        <applicationService serviceImplementation="com.claudeacp.DiffPaletteService"/>
 
         <!-- Settings : Tools → AgentNav ACP -->
         <applicationConfigurable
@@ -42,4 +82,18 @@
             id="com.claudeacp.settings"
             displayName="AgentNav ACP"/>
     </extensions>
+
+    <actions>
+        <!-- Action contextuelle dans les éditeurs : Ctrl+Alt+L pour ajouter la sélection
+             courante au chat AgentNav (style Cursor). Aussi disponible via right-click
+             dans l'éditeur. -->
+        <action id="com.claudeacp.AddSelectionToChat"
+                class="com.claudeacp.AddSelectionToChatAction"
+                text="Add Selection to AgentNav Chat"
+                description="Attach the current editor selection (with file:line range) to the active AgentNav chat.">
+            <keyboard-shortcut keymap="$default" first-keystroke="control alt L"/>
+            <keyboard-shortcut keymap="Mac OS X" first-keystroke="meta alt L"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+    </actions>
 </idea-plugin>

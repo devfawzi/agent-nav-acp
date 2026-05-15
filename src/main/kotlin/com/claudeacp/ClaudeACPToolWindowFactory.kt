@@ -18,11 +18,17 @@ class ClaudeACPToolWindowFactory : ToolWindowFactory, DumbAware {
     private val sessionCounter = AtomicInteger(1)
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
+        // Restaure la palette diff persistée au démarrage de la tool window (1er chat).
+        DiffPaletteService.getInstance().restoreOnStartup()
+
         addNewChatContent(project, toolWindow)
         toolWindow.setTitleActions(listOf(
             NewChatAction(project, toolWindow),
             ResumeChatAction(project, toolWindow),
-            RenameChatAction(toolWindow)
+            RenameChatAction(toolWindow),
+            MemoryInspectorAction(project),
+            ShowLogsAction(project),
+            SettingsAction(project)
         ))
     }
 
@@ -123,6 +129,47 @@ class ClaudeACPToolWindowFactory : ToolWindowFactory, DumbAware {
     ) : AnAction("New Chat", "Start a new Claude chat", AllIcons.General.Add) {
         override fun actionPerformed(e: AnActionEvent) {
             addNewChatContent(project, toolWindow)
+        }
+        override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
+    }
+
+    private inner class MemoryInspectorAction(
+        private val project: Project
+    ) : AnAction("Inspect Claude Memory", "Show files Claude auto-loads as memory + delete entries", AllIcons.Actions.SearchWithHistory) {
+        override fun actionPerformed(e: AnActionEvent) {
+            val acpService = project.getService(ClaudeACPService::class.java)
+            val paths = acpService.lastMemoryPaths
+            if (paths.isEmpty()) {
+                // Fallback : on tente avec le dossier standard du projet courant
+                val basePath = project.basePath
+                val home = System.getProperty("user.home") ?: ""
+                if (basePath != null && home.isNotEmpty()) {
+                    val encoded = basePath.replace("/", "-")
+                    val fallback = mapOf("auto" to "$home/.claude/projects/$encoded/memory/")
+                    MemoryInspectorDialog(project, fallback).show()
+                    return
+                }
+            }
+            MemoryInspectorDialog(project, paths).show()
+        }
+        override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
+    }
+
+    private inner class ShowLogsAction(
+        private val project: Project
+    ) : AnAction("Show Plugin Logs", "Live logs (control requests/responses, state changes, errors)", AllIcons.Debugger.Console) {
+        override fun actionPerformed(e: AnActionEvent) {
+            PluginLogDialog(project).show()
+        }
+        override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
+    }
+
+    private inner class SettingsAction(
+        private val project: Project
+    ) : AnAction("Open AgentNav Settings", "Open the AgentNav ACP settings page", AllIcons.General.GearPlain) {
+        override fun actionPerformed(e: AnActionEvent) {
+            com.intellij.openapi.options.ShowSettingsUtil.getInstance()
+                .showSettingsDialog(project, AgentSettingsConfigurable::class.java)
         }
         override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
     }

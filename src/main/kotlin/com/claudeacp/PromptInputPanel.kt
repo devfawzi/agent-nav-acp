@@ -60,16 +60,24 @@ class PromptInputPanel(
         background = UIUtil.getTextFieldBackground()
     }
 
-    private val modeButton = createMenuButton("Mode")
-    private val modelButton = createMenuButton("Model")
-    private val effortButton = createMenuButton("Effort")
-    private val skillsButton = createMenuButton("Skills")
-    private val mcpButton = createMenuButton("MCP")
+    // Cached config — utilisée pour résoudre les slash commands au moment du send.
+    @Volatile
+    private var currentConfig: ClaudeACPService.SessionConfig = ClaudeACPService.SessionConfig()
+
+    /** Label discret à droite du textarea pour rappeler que `/` ouvre les commandes. */
+    private val slashHintLabel = JLabel("type / for commands").apply {
+        font = font.deriveFont(Font.ITALIC, 10f)
+        foreground = JBColor.GRAY
+        border = JBUI.Borders.emptyRight(6)
+    }
 
     private val attachButton = JButton(AllIcons.General.Add).apply {
         toolTipText = "Attach files or images"
-        margin = JBUI.insets(4)
+        margin = JBUI.emptyInsets()
+        preferredSize = Dimension(28, 28)
         isFocusPainted = false
+        isContentAreaFilled = false
+        border = JBUI.Borders.empty()
     }
 
     private val agentButton = JButton("Agent ▾").apply {
@@ -81,8 +89,12 @@ class PromptInputPanel(
 
     private val sendButton = JButton("➤").apply {
         toolTipText = "Send (Enter — Shift+Enter for new line)"
-        margin = JBUI.insets(4, 10)
-        font = font.deriveFont(Font.BOLD)
+        margin = JBUI.emptyInsets()
+        preferredSize = Dimension(28, 28)
+        isFocusPainted = false
+        isContentAreaFilled = false
+        border = JBUI.Borders.empty()
+        font = font.deriveFont(Font.BOLD, 14f)
     }
 
     private val attachmentsPanel = JPanel(FlowLayout(FlowLayout.LEFT, 4, 4)).apply {
@@ -102,9 +114,38 @@ class PromptInputPanel(
 
     private var onSend: ((String, List<PromptAttachment>) -> Unit)? = null
     private var onCancel: (() -> Unit)? = null
+    private var onSlashCommand: ((cmd: String, args: String) -> Unit)? = null
+
+    /** Slash commands interceptés par le plugin (ne sont PAS envoyés à claude). */
+    private val PLUGIN_SLASH_COMMANDS = setOf("mode", "model", "effort", "skill", "skills", "mcp")
 
     private val fileMentionPopup = FileMentionPopup(project, textArea) { entry ->
         replaceMentionToken(entry)
+    }
+
+    private val slashPopup: SlashCommandPopup = SlashCommandPopup(textArea) { picked ->
+        onSlashPopupPick(picked)
+    }
+
+    /**
+     * Quand l'user choisit une slash command dans le popup `/`, le comportement dépend du type :
+     *  - Commande PLUGIN (mode/model/effort/skill/mcp) → déclenche directement la SlashPickerCard
+     *    interactive dans le chat. Pas besoin d'Enter. L'user voit immédiatement les options.
+     *  - Commande claude (/init, /review, /security-review, skills user) → insère `/<cmd> ` dans
+     *    le textarea pour que l'user ajoute des args si besoin et envoie via Enter.
+     */
+    private fun onSlashPopupPick(picked: String) {
+        textArea.text = ""  // vide le textarea (qui contenait `/<filter>`)
+        if (picked.lowercase() in PLUGIN_SLASH_COMMANDS) {
+            onSlashCommand?.invoke(picked.lowercase(), "")
+            textArea.requestFocusInWindow()
+        } else {
+            // Commande claude : insère et focus pour que user complete + Send
+            val insertion = "/$picked "
+            textArea.text = insertion
+            textArea.caretPosition = insertion.length
+            textArea.requestFocusInWindow()
+        }
     }
 
     fun getContent(): JComponent {
@@ -132,9 +173,9 @@ class PromptInputPanel(
             JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
         ).apply {
             border = null
-            preferredSize = Dimension(0, 90)
-            minimumSize = Dimension(0, 50)
-            maximumSize = Dimension(Int.MAX_VALUE, 160)
+            preferredSize = Dimension(0, 72)
+            minimumSize = Dimension(0, 36)
+            maximumSize = Dimension(Int.MAX_VALUE, 140)
         }
 
         val centerStack = object : JPanel() {
@@ -146,32 +187,25 @@ class PromptInputPanel(
             add(scrollText)
         }
 
-        // Footer : dropdowns dans CENTER avec WrapLayout (multi-row si fenêtre étroite).
-        // Send/Stop dans EAST → toujours à droite, peu importe la largeur.
-        val toolbar = JPanel(WrapLayout(FlowLayout.LEFT, 4, 2)).apply {
+        // Footer minimaliste : à gauche [+] [Agent ▾] ; à droite [▶/⏹].
+        // Tout le reste (Mode/Model/Effort/Skills/MCP) passe en slash commands dans le chat.
+        val leftToolbar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
             background = UIUtil.getPanelBackground()
             add(attachButton)
             add(agentButton)
-            add(modeButton)
-            add(modelButton)
-            add(effortButton)
-            add(skillsButton)
-            add(mcpButton)
         }
         updateAgentButtonLabel()
         agentButton.addActionListener { showAgentMenu() }
-        // sendButton positionné en bas du panel EAST quand le toolbar wrap en multi-row,
-        // pour rester visuellement "fixé en bas à droite".
-        val sendPanel = JPanel().apply {
-            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+
+        val rightToolbar = JPanel(FlowLayout(FlowLayout.RIGHT, 4, 0)).apply {
             background = UIUtil.getPanelBackground()
-            add(Box.createVerticalGlue())
-            add(sendButton.apply { alignmentX = Component.RIGHT_ALIGNMENT })
+            add(slashHintLabel)
+            add(sendButton)
         }
         val footer = JPanel(BorderLayout()).apply {
             background = UIUtil.getPanelBackground()
-            add(toolbar, BorderLayout.CENTER)
-            add(sendPanel, BorderLayout.EAST)
+            add(leftToolbar, BorderLayout.WEST)
+            add(rightToolbar, BorderLayout.EAST)
         }
 
         attachButton.addActionListener { openFilePicker() }
@@ -201,6 +235,11 @@ class PromptInputPanel(
         onCancel = handler
     }
 
+    /** Callback invoqué pour les slash commands interceptés (/mode /model /effort /skill /mcp). */
+    fun onSlashCommand(handler: (cmd: String, args: String) -> Unit) {
+        onSlashCommand = handler
+    }
+
     fun setReady(ready: Boolean) {
         sendButton.isEnabled = ready
         textArea.isEnabled = ready
@@ -217,23 +256,218 @@ class PromptInputPanel(
     private fun setupTextAreaKeys() {
         textArea.addKeyListener(object : KeyAdapter() {
             override fun keyPressed(e: KeyEvent) {
-                // Le popup mention intercepte d'abord (Up/Down/Enter/Tab/Esc)
+                // Les popups interceptent d'abord (Up/Down/Enter/Tab/Esc)
+                if (slashPopup.handleKey(e)) return
                 if (fileMentionPopup.handleKey(e)) return
 
                 if (e.keyCode == KeyEvent.VK_ENTER && !e.isShiftDown) {
                     e.consume()
-                    // Pendant qu'un prompt s'exécute, Enter ne doit pas tenter d'envoyer
-                    // un nouveau message — il faut d'abord stopper via le bouton ⏹.
                     if (!isExecuting) send()
                 }
             }
 
             override fun keyReleased(e: KeyEvent) {
-                // Si on a tapé @ ou modifié le token courant : refresh popup
                 if (e.keyCode == KeyEvent.VK_ESCAPE) return
+                // Skip update si l'event était une touche de navigation des popups — sinon
+                // on reclear la liste et la sélection retombe à 0.
+                val isNav = e.keyCode in setOf(
+                    KeyEvent.VK_UP, KeyEvent.VK_DOWN,
+                    KeyEvent.VK_LEFT, KeyEvent.VK_RIGHT,
+                    KeyEvent.VK_ENTER, KeyEvent.VK_TAB
+                )
+                if (isNav) return
                 updateMentionPopup()
+                updateSlashPopup()
             }
         })
+    }
+
+    /**
+     * Affiche le popup slash si le textarea commence par `/` et que le caret est dans le
+     * token correspondant. Le filtre = ce qui est après le `/` jusqu'au caret.
+     */
+    private fun updateSlashPopup() {
+        val text = textArea.text
+        val pos = textArea.caretPosition
+        // Conditions : `/` est en position 0 du texte (slash command de toute le ligne).
+        // Si l'user met un espace AVANT le `/`, on ne déclenche pas (probable mention).
+        if (!text.startsWith("/")) {
+            slashPopup.hide()
+            return
+        }
+        // Si le caret est avant la fin du 1er mot ou juste après
+        val tokenEnd = text.indexOf(' ').let { if (it == -1) text.length else it }
+        if (pos > tokenEnd) {
+            slashPopup.hide()
+            return
+        }
+        val filter = text.substring(1, pos)
+        // Refresh la liste des commandes à chaque fois (la config peut avoir changé)
+        slashPopup.setEntries(buildSlashEntries())
+        slashPopup.anchorIndex = 0
+        slashPopup.show(filter)
+    }
+
+    private fun buildSlashEntries(): List<SlashCommandPopup.Entry> {
+        val plugin = listOf(
+            SlashCommandPopup.Entry(
+                name = "model",
+                description = "Switch Claude model (Opus / Sonnet / Haiku)",
+                isPlugin = true,
+                submenuProvider = { buildModelSubmenu() }
+            ),
+            SlashCommandPopup.Entry(
+                name = "mode",
+                description = "Switch permission mode",
+                isPlugin = true,
+                submenuProvider = { buildModeSubmenu() }
+            ),
+            SlashCommandPopup.Entry(
+                name = "effort",
+                description = "Change extended thinking effort",
+                isPlugin = true,
+                submenuProvider = { buildEffortSubmenu() }
+            ),
+            SlashCommandPopup.Entry(
+                name = "mcp",
+                description = "Browse MCP servers & tools",
+                isPlugin = true,
+                submenuProvider = { buildMcpSubmenu() }
+            ),
+            SlashCommandPopup.Entry(
+                name = "skill",
+                description = "Browse skills & slash commands",
+                isPlugin = true,
+                submenuProvider = { buildSkillsSubmenu() }
+            )
+        )
+        val skillSet = currentConfig.skills.toSet()
+        val claudeCmds = currentConfig.slashCommands.sorted().map { name ->
+            val isUserSkill = name in skillSet
+            SlashCommandPopup.Entry(
+                name = name,
+                description = if (isUserSkill) "skill (user)" else "Claude built-in",
+                isPlugin = false
+            )
+        }
+        return plugin + claudeCmds
+    }
+
+    private fun buildModelSubmenu(): List<SlashCommandPopup.Entry> {
+        val sid = getMySessionId()
+        return currentConfig.models.map { opt ->
+            SlashCommandPopup.Entry(
+                name = opt.name,
+                description = opt.description ?: opt.id,
+                isPlugin = false,
+                checked = opt.id == currentConfig.currentModelId,
+                onActivate = { acpService.setModel(opt.id, targetSessionId = sid) }
+            )
+        }
+    }
+
+    private fun buildModeSubmenu(): List<SlashCommandPopup.Entry> {
+        val sid = getMySessionId()
+        return currentConfig.modes.map { opt ->
+            SlashCommandPopup.Entry(
+                name = opt.name,
+                description = opt.description ?: opt.id,
+                isPlugin = false,
+                checked = opt.id == currentConfig.currentModeId,
+                onActivate = { acpService.setMode(opt.id, targetSessionId = sid) }
+            )
+        }
+    }
+
+    private fun buildEffortSubmenu(): List<SlashCommandPopup.Entry> {
+        val sid = getMySessionId()
+        val effortOpt = currentConfig.configOptions.firstOrNull {
+            it.id.lowercase().contains("thought") || it.id.lowercase().contains("effort")
+                || it.name.lowercase().contains("effort") || it.name.lowercase().contains("thinking")
+        } ?: return listOf(SlashCommandPopup.Entry("(unavailable)", "Not exposed by this agent", false))
+        return effortOpt.options.map { opt ->
+            SlashCommandPopup.Entry(
+                name = opt.name,
+                description = opt.description ?: opt.id,
+                isPlugin = false,
+                checked = opt.id == effortOpt.currentValue,
+                onActivate = { acpService.setConfigOption(effortOpt.id, opt.id, targetSessionId = sid) }
+            )
+        }
+    }
+
+    private fun buildMcpSubmenu(): List<SlashCommandPopup.Entry> {
+        val out = mutableListOf<SlashCommandPopup.Entry>()
+        // On affiche seulement les SERVERS (pas les tools un par un — trop long).
+        // Compte les tools par server pour donner l'info en description.
+        val toolsByServer: Map<String, Int> = currentConfig.mcpTools
+            .mapNotNull { it.removePrefix("mcp__").substringBefore("__").ifEmpty { null } }
+            .groupingBy { it }
+            .eachCount()
+
+        currentConfig.mcpServers.forEach { srv ->
+            val icon = when (srv.status) {
+                "connected" -> "🟢"
+                "needs-auth" -> "🔑"
+                "failed", "error" -> "❌"
+                else -> "⚪"
+            }
+            // claude normalise les noms : "claude.ai Gmail" → "claude_ai_Gmail" pour le tool name.
+            val normalized = srv.name.replace(Regex("[^A-Za-z0-9]"), "_")
+            val toolCount = toolsByServer[normalized] ?: toolsByServer[srv.name] ?: 0
+            out += SlashCommandPopup.Entry(
+                name = srv.name,
+                description = "${srv.status} · $toolCount tool(s) — click to mention in prompt",
+                isPlugin = false,
+                icon = icon,
+                onActivate = {
+                    val text = when (srv.status) {
+                        "needs-auth" -> "Authenticate the ${srv.name} MCP server. "
+                        else -> "Use the ${srv.name} MCP server to "
+                    }
+                    insertText(text)
+                }
+            )
+        }
+        // Action de bas : ouvrir la Settings MCP pour voir le détail des tools par server
+        out += SlashCommandPopup.Entry(
+            name = "⚙ Manage MCP servers…",
+            description = "Open Settings: list servers + their tools, configure --mcp-config",
+            isPlugin = false,
+            onActivate = {
+                com.intellij.openapi.options.ShowSettingsUtil.getInstance()
+                    .showSettingsDialog(project, AgentSettingsConfigurable::class.java)
+            }
+        )
+        if (currentConfig.mcpServers.isEmpty()) {
+            out.add(0, SlashCommandPopup.Entry(
+                name = "(no MCP detected yet)",
+                description = "Send a first prompt to let Claude load its MCP config, or open Settings",
+                isPlugin = false
+            ))
+        }
+        return out
+    }
+
+    private fun buildSkillsSubmenu(): List<SlashCommandPopup.Entry> {
+        val skillSet = currentConfig.skills.toSet()
+        val items = currentConfig.slashCommands.sorted().map { name ->
+            val isUserSkill = name in skillSet
+            SlashCommandPopup.Entry(
+                name = name,
+                description = if (isUserSkill) "user skill" else "Claude built-in",
+                isPlugin = false,
+                icon = if (isUserSkill) "🧩" else "⚙",
+                onActivate = { insertText("/$name ") }
+            )
+        }
+        return items.ifEmpty {
+            listOf(SlashCommandPopup.Entry(
+                name = "(no skills)",
+                description = "Send a first prompt so Claude loads its skill list",
+                isPlugin = false
+            ))
+        }
     }
 
     private fun updateMentionPopup() {
@@ -359,10 +593,15 @@ class PromptInputPanel(
                             }
                         }
                     }
-                    // 5) Texte plain : insertion standard
+                    // 5) Texte plain : check si ça vient d'une sélection éditeur (Cursor-like)
                     if (tr.isDataFlavorSupported(DataFlavor.stringFlavor)) {
                         val s = tr.getTransferData(DataFlavor.stringFlavor) as? String
                         if (s != null) {
+                            val looksLikeCode = s.contains('\n') || s.length > 80
+                            if (looksLikeCode) {
+                                val ref = EditorSelectionGrabber.tryMatchClipboard(project, s)
+                                if (ref != null) { addAttachment(ref); return true }
+                            }
                             textArea.replaceSelection(s)
                             return true
                         }
@@ -481,10 +720,15 @@ class PromptInputPanel(
                     }
                 }
             }
-            // 5) Texte standard : insertion classique
+            // 5) Texte standard : check sélection éditeur d'abord (Cursor-like)
             if (tr.isDataFlavorSupported(DataFlavor.stringFlavor)) {
                 val s = tr.getTransferData(DataFlavor.stringFlavor) as? String
                 if (s != null) {
+                    val looksLikeCode = s.contains('\n') || s.length > 80
+                    if (looksLikeCode) {
+                        val ref = EditorSelectionGrabber.tryMatchClipboard(project, s)
+                        if (ref != null) { addAttachment(ref); return true }
+                    }
                     textArea.replaceSelection(s)
                     return true
                 }
@@ -696,210 +940,52 @@ class PromptInputPanel(
         if (isExecuting) return  // garde-fou : ne jamais envoyer pendant qu'on exécute
         val txt = textArea.text.trim()
         if (txt.isEmpty() && attachments.isEmpty()) return
+
+        // Intercept des slash commands plugin (/mode /model /effort /skill /mcp) :
+        // ne PAS envoyer à claude, déclencher un picker UI à la place.
+        if (txt.startsWith("/")) {
+            val first = txt.substringBefore(' ').substring(1).lowercase()
+            if (first in PLUGIN_SLASH_COMMANDS) {
+                val args = txt.substringAfter(' ', "").trim()
+                onSlashCommand?.invoke(first, args)
+                textArea.text = ""
+                return
+            }
+        }
+
         onSend?.invoke(txt, attachments.toList())
         textArea.text = ""
         attachments.clear()
         refreshAttachmentsPanel()
     }
 
-    // ── Model / Mode / Effort menus (inchangé) ───────────────────────────────
+    // ── Config cache (les anciens dropdowns sont remplacés par les slash commands) ───
 
     private fun updateButtons(config: ClaudeACPService.SessionConfig) {
-        val currentMode = config.modes.firstOrNull { it.id == config.currentModeId }
-        modeButton.text = "Mode: ${currentMode?.name ?: "default"} ▾"
-        modeButton.isEnabled = config.modes.isNotEmpty()
-
-        val currentModel = config.models.firstOrNull { it.id == config.currentModelId }
-        modelButton.text = "Model: ${currentModel?.name ?: "Default"} ▾"
-        modelButton.isEnabled = config.models.isNotEmpty()
-
-        val effortOpt = config.configOptions.firstOrNull {
-            it.id.lowercase().contains("thought") || it.id.lowercase().contains("effort")
-                || it.name.lowercase().contains("effort") || it.name.lowercase().contains("thinking")
-        }
-        if (effortOpt != null) {
-            val curr = effortOpt.options.firstOrNull { it.id == effortOpt.currentValue }
-            effortButton.text = "Effort: ${curr?.name ?: effortOpt.currentValue ?: "default"} ▾"
-            effortButton.isEnabled = true
-        } else {
-            effortButton.text = "Effort: -"
-            effortButton.isEnabled = false
-        }
-
-        wireModelMenu(config)
-        wireModeMenu(config)
-        wireEffortMenu(effortOpt)
-        wireSkillsMenu(config)
-        wireMcpMenu(config)
+        currentConfig = config
     }
 
-    private fun wireSkillsMenu(config: ClaudeACPService.SessionConfig) {
-        for (l in skillsButton.actionListeners) skillsButton.removeActionListener(l)
-        val commands = config.slashCommands
-        // Sépare visuellement skills (custom user) des autres slash commands (built-in).
-        // claude renvoie les deux dans slash_commands ; le sous-ensemble `skills` (claude 2.1+)
-        // sert à les identifier.
-        val skillSet = config.skills.toSet()
-        skillsButton.isEnabled = commands.isNotEmpty()
-        skillsButton.text = if (commands.isEmpty()) "Skills" else "Skills (${commands.size}) ▾"
-        if (commands.isEmpty()) return
-        skillsButton.addActionListener {
-            val menu = JPopupMenu()
-            val (userSkills, builtins) = commands.sorted().partition { it in skillSet }
-            if (userSkills.isNotEmpty()) {
-                val header = JMenuItem("— Skills —").apply { isEnabled = false }
-                menu.add(header)
-                userSkills.forEach { cmd ->
-                    val item = JMenuItem("/$cmd")
-                    item.toolTipText = "Run skill: $cmd"
-                    item.addActionListener { insertSlashCommand(cmd) }
-                    menu.add(item)
-                }
-                if (builtins.isNotEmpty()) menu.addSeparator()
-            }
-            if (builtins.isNotEmpty()) {
-                val header = JMenuItem("— Commands —").apply { isEnabled = false }
-                menu.add(header)
-                builtins.forEach { cmd ->
-                    val item = JMenuItem("/$cmd")
-                    item.toolTipText = "Insert /$cmd"
-                    item.addActionListener { insertSlashCommand(cmd) }
-                    menu.add(item)
-                }
-            }
-            menu.show(skillsButton, 0, skillsButton.height)
-        }
-    }
+    /** Exposé pour ClaudeACPToolWindowPanel afin de résoudre les slash commands. */
+    fun getCurrentConfig(): ClaudeACPService.SessionConfig = currentConfig
 
-    private fun wireMcpMenu(config: ClaudeACPService.SessionConfig) {
-        for (l in mcpButton.actionListeners) mcpButton.removeActionListener(l)
-        val servers = config.mcpServers
-        val tools = config.mcpTools
-        mcpButton.isEnabled = servers.isNotEmpty() || tools.isNotEmpty()
-        mcpButton.text = when {
-            servers.isEmpty() && tools.isEmpty() -> "MCP"
-            servers.isEmpty() -> "MCP (${tools.size}) ▾"
-            else -> "MCP (${servers.size}/${tools.size}) ▾"
-        }
-        if (!mcpButton.isEnabled) return
-        mcpButton.addActionListener {
-            val menu = JPopupMenu()
-            if (servers.isNotEmpty()) {
-                val header = JMenuItem("— Servers —").apply { isEnabled = false }
-                menu.add(header)
-                servers.forEach { srv ->
-                    val icon = when (srv.status) {
-                        "connected" -> "🟢"
-                        "needs-auth" -> "🔑"
-                        "failed", "error" -> "❌"
-                        else -> "⚪"
-                    }
-                    val item = JMenuItem("$icon ${srv.name} (${srv.status})")
-                    item.toolTipText = when (srv.status) {
-                        "needs-auth" -> "Not authenticated. Click to insert an auth prompt."
-                        "connected" -> "Connected. Click to insert a hint that mentions this server."
-                        else -> "Status: ${srv.status}. Click to insert a mention."
-                    }
-                    item.addActionListener {
-                        when (srv.status) {
-                            "needs-auth" -> {
-                                // Demande à claude d'authentifier le server via le tool MCP correspondant
-                                // (mcp__<server>__authenticate). claude le détecte dans tools[].
-                                val insertion = "Authenticate the ${srv.name} MCP server. "
-                                textArea.text = insertion + textArea.text
-                                textArea.caretPosition = insertion.length
-                            }
-                            else -> {
-                                val insertion = "Use the ${srv.name} MCP server to "
-                                textArea.text = insertion + textArea.text
-                                textArea.caretPosition = insertion.length
-                            }
-                        }
-                        textArea.requestFocusInWindow()
-                    }
-                    menu.add(item)
-                }
-                if (tools.isNotEmpty()) menu.addSeparator()
-            }
-            if (tools.isNotEmpty()) {
-                val header = JMenuItem("— Tools —").apply { isEnabled = false }
-                menu.add(header)
-                tools.sorted().forEach { tool ->
-                    // Format: mcp__server__action → server / action
-                    val parts = tool.removePrefix("mcp__").split("__", limit = 2)
-                    val label = if (parts.size == 2) "${parts[0]} · ${parts[1]}" else tool
-                    val item = JMenuItem(label)
-                    item.toolTipText = tool
-                    item.addActionListener {
-                        // Insert mention textuelle au lieu d'invoquer direct — claude
-                        // décidera quand utiliser le tool selon l'intent.
-                        textArea.text = "Use $tool to … " + textArea.text
-                        textArea.requestFocusInWindow()
-                    }
-                    menu.add(item)
-                }
-            }
-            menu.addSeparator()
-            val openCfg = JMenuItem("⚙ Configure MCP servers…")
-            openCfg.toolTipText = "Set --mcp-config path in settings"
-            openCfg.addActionListener {
-                com.intellij.openapi.options.ShowSettingsUtil.getInstance()
-                    .showSettingsDialog(project, AgentSettingsConfigurable::class.java)
-            }
-            menu.add(openCfg)
-            menu.show(mcpButton, 0, mcpButton.height)
-        }
-    }
-
-    private fun insertSlashCommand(cmd: String) {
-        // Insère au début du textArea (les slash commands de claude doivent être seuls).
-        val insertion = "/$cmd "
-        textArea.text = insertion + textArea.text
-        textArea.caretPosition = insertion.length
+    /** Insère du texte au début du textarea et focus. Utilisé par les SlashPickerCards. */
+    fun insertText(text: String) {
+        textArea.text = text + textArea.text
+        textArea.caretPosition = text.length
         textArea.requestFocusInWindow()
     }
 
-    private fun wireModelMenu(config: ClaudeACPService.SessionConfig) {
-        for (l in modelButton.actionListeners) modelButton.removeActionListener(l)
-        modelButton.addActionListener {
-            val menu = JPopupMenu()
-            config.models.forEach { opt ->
-                val item = JMenuItem(opt.name + if (opt.id == config.currentModelId) "  ✓" else "")
-                item.toolTipText = opt.description
-                item.addActionListener { acpService.setModel(opt.id, targetSessionId = getMySessionId()) }
-                menu.add(item)
-            }
-            menu.show(modelButton, 0, modelButton.height)
-        }
+    /** Remplace le textarea par `text` et envoie immédiatement comme prompt. */
+    fun sendDirectly(text: String) {
+        if (isExecuting) return
+        textArea.text = text
+        send()
     }
 
-    private fun wireModeMenu(config: ClaudeACPService.SessionConfig) {
-        for (l in modeButton.actionListeners) modeButton.removeActionListener(l)
-        modeButton.addActionListener {
-            val menu = JPopupMenu()
-            config.modes.forEach { opt ->
-                val item = JMenuItem(opt.name + if (opt.id == config.currentModeId) "  ✓" else "")
-                item.toolTipText = opt.description
-                item.addActionListener { acpService.setMode(opt.id, targetSessionId = getMySessionId()) }
-                menu.add(item)
-            }
-            menu.show(modeButton, 0, modeButton.height)
-        }
-    }
-
-    private fun wireEffortMenu(effort: ClaudeACPService.ConfigOption?) {
-        for (l in effortButton.actionListeners) effortButton.removeActionListener(l)
-        if (effort == null) return
-        effortButton.addActionListener {
-            val menu = JPopupMenu()
-            effort.options.forEach { opt ->
-                val item = JMenuItem(opt.name + if (opt.id == effort.currentValue) "  ✓" else "")
-                item.toolTipText = opt.description
-                item.addActionListener { acpService.setConfigOption(effort.id, opt.id, targetSessionId = getMySessionId()) }
-                menu.add(item)
-            }
-            menu.show(effortButton, 0, effortButton.height)
-        }
+    /** Ajoute un attachment depuis une source externe (ex: AddSelectionToChatAction). */
+    fun addAttachmentExternal(att: PromptAttachment) {
+        addAttachment(att)
+        textArea.requestFocusInWindow()
     }
 
     private fun updateAgentButtonLabel() {
@@ -954,6 +1040,7 @@ class PromptInputPanel(
         menu.show(agentButton, 0, agentButton.height)
     }
 
+    @Suppress("unused")
     private fun createMenuButton(label: String): JButton {
         return JButton("$label ▾").apply {
             margin = JBUI.insets(2, 6)

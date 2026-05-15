@@ -81,6 +81,37 @@ class PendingChangesService(private val project: Project) {
         }
     }
 
+    /**
+     * Accept partiel : écrit un contenu intermédiaire sur disque (ex: sous-ensemble de hunks
+     * acceptés sur les N proposés par claude), puis retire le change de la liste. Utilisé par
+     * le hunk-by-hunk picker. On marque rejectInProgress pour que le VFS listener ne crée pas
+     * un nouveau pending change à partir de cette écriture.
+     */
+    @Synchronized
+    fun applyPartial(path: String, content: String) {
+        val change = changes.remove(path) ?: return
+        rejectInProgress.add(path)
+        log.info("Apply partial: $path (${content.length}c)")
+        ApplicationManager.getApplication().invokeLater {
+            ApplicationManager.getApplication().runWriteAction {
+                try {
+                    val vf = change.virtualFile?.takeIf { it.isValid }
+                        ?: LocalFileSystem.getInstance().refreshAndFindFileByPath(path)
+                    if (vf != null && vf.exists()) {
+                        vf.setBinaryContent(content.toByteArray())
+                    } else {
+                        File(path).writeText(content)
+                        LocalFileSystem.getInstance().refreshAndFindFileByPath(path)
+                    }
+                } catch (e: Exception) {
+                    log.error("Failed to apply partial for $path", e)
+                    rejectInProgress.remove(path)
+                }
+            }
+        }
+        notifyListeners()
+    }
+
     @Synchronized
     fun reject(path: String) {
         val change = changes.remove(path) ?: return
