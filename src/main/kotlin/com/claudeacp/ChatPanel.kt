@@ -1,5 +1,8 @@
 package com.claudeacp
 
+import com.claudeacp.core.ChatFonts
+import com.claudeacp.core.PermissionRequest
+import com.claudeacp.core.ToolCallInfo
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileTypes.FileTypeManager
@@ -111,7 +114,7 @@ class ChatPanel(
         currentThinkingBlock!!.appendText(text)
     }
 
-    fun appendToolCall(info: ClaudeACPService.ToolCallInfo) {
+    fun appendToolCall(info: ToolCallInfo) {
         currentAssistantMessage = null
         currentThinkingBlock = null
 
@@ -203,7 +206,7 @@ class ChatPanel(
     }
 
     /** Affiche un dialog inline Allow/Deny pour une permission request claude (Bash, MCP, etc.). */
-    fun appendPermissionRequest(req: ClaudeACPService.PermissionRequest) {
+    fun appendPermissionRequest(req: PermissionRequest) {
         finalizePending()
         addMessage(PermissionRequestCard(req))
     }
@@ -283,7 +286,7 @@ private class UserMessage(text: String) : JPanel(BorderLayout()) {
             caretColor = Color.WHITE
             selectionColor = Color(0x4a6fa5)
             border = JBUI.Borders.empty(6, 10)
-            font = Font(Font.SANS_SERIF, Font.PLAIN, 13)
+            font = ChatFonts.regular(13)
         }
         bubble.add(area, BorderLayout.CENTER)
 
@@ -318,7 +321,7 @@ private class AssistantMessage(
         background = UIUtil.getPanelBackground()
         foreground = JBColor.foreground()
         border = JBUI.Borders.empty(0, 2)
-        font = Font(Font.SANS_SERIF, Font.PLAIN, 12)
+        font = ChatFonts.regular(13)
         putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
     }
 
@@ -351,7 +354,10 @@ private class AssistantMessage(
 
         // Swing HTML parser est très limité : pas de rgba(), pas de border-radius, pas de
         // overflow-x. Garder un CSS minimaliste avec uniquement les propriétés supportées.
-        val html = "<html><body style=\"font-family:sans-serif;font-size:11px;color:$rgb;\">$htmlBody</body></html>"
+        // Force la famille du chat (Inter > SF > Segoe > sans) pour matcher le look Cursor-like.
+        // font-size en pt pour que Swing l'interprète correctement (px est fragile dans le parser HTML).
+        val cssFamily = ChatFonts.cssFamily()
+        val html = "<html><body style=\"font-family:$cssFamily;font-size:12pt;color:$rgb;line-height:1.45;\">$htmlBody</body></html>"
 
         try {
             pane.contentType = "text/html"
@@ -379,7 +385,7 @@ private class ThinkingBlock : JPanel(BorderLayout()) {
         columns = 50
         background = UIUtil.getPanelBackground()
         foreground = JBColor.GRAY
-        font = Font(Font.SANS_SERIF, Font.ITALIC, 12)
+        font = ChatFonts.italic(12)
         border = JBUI.Borders.empty(6, 12)
     }
     private val toggle: JButton
@@ -938,7 +944,7 @@ private class RunCommandBlock(initialCommand: String) : JPanel(BorderLayout()) {
  */
 private class PlanPreviewCard(
     project: Project,
-    private val info: ClaudeACPService.ToolCallInfo
+    private val info: ToolCallInfo
 ) : JPanel(BorderLayout()) {
 
     private val cardBg = JBColor(Color(0xfff8e7), Color(0x3a3520))  // jaune pâle : "proposé"
@@ -1281,7 +1287,7 @@ private class AskUserQuestionCard(
  * service qui renvoie un control_response à claude pour débloquer ou refuser le tool.
  */
 private class PermissionRequestCard(
-    private val req: ClaudeACPService.PermissionRequest
+    private val req: PermissionRequest
 ) : JPanel(BorderLayout()) {
 
     private val cardBg = JBColor(Color(0xfff4d6), Color(0x3a2f1a))
@@ -1291,7 +1297,8 @@ private class PermissionRequestCard(
         foreground = JBColor.GRAY
         border = JBUI.Borders.empty(2, 8, 0, 0)
     }
-    private val allowBtn = JButton("✅ Allow")
+    private val allowBtn = JButton("✅ Allow once")
+    private val allowAlwaysBtn = JButton("🔓 Allow always")
     private val denyBtn = JButton("✗ Deny")
     @Volatile private var done = false
 
@@ -1319,12 +1326,19 @@ private class PermissionRequestCard(
         }
 
         allowBtn.margin = JBUI.insets(2, 8)
+        allowAlwaysBtn.margin = JBUI.insets(2, 8)
         denyBtn.margin = JBUI.insets(2, 8)
         allowBtn.addActionListener {
             if (done) return@addActionListener
             done = true
-            lockButtons("✓ Allowed")
+            lockButtons("✓ Allowed once")
             req.respondAllow()
+        }
+        allowAlwaysBtn.addActionListener {
+            if (done) return@addActionListener
+            done = true
+            lockButtons("✓ Allowed (session)")
+            req.respondAllowAlways?.invoke()
         }
         denyBtn.addActionListener {
             if (done) return@addActionListener
@@ -1333,10 +1347,17 @@ private class PermissionRequestCard(
             req.respondDeny("Denied by user")
         }
 
+        // "Allow always" n'apparaît que si claude nous a fourni des permission_suggestions
+        // (sinon on ne saurait pas quelle règle ajouter pour ne plus redemander).
+        allowAlwaysBtn.isVisible = req.respondAllowAlways != null
+        allowAlwaysBtn.toolTipText =
+            "Allow this tool/path for the rest of this chat session — Claude won't ask again for similar requests."
+
         val buttons = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
             background = cardBg
             border = JBUI.Borders.empty(2, 10, 8, 10)
             add(allowBtn)
+            add(allowAlwaysBtn)
             add(denyBtn)
             add(statusLabel)
         }
@@ -1369,6 +1390,7 @@ private class PermissionRequestCard(
 
     private fun lockButtons(message: String) {
         allowBtn.isEnabled = false
+        allowAlwaysBtn.isEnabled = false
         denyBtn.isEnabled = false
         statusLabel.text = message
     }

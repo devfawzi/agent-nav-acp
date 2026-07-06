@@ -36,7 +36,26 @@ class AgentSettings : PersistentStateComponent<AgentSettings.State> {
          */
         var injectDiagnostics: Boolean = true,
         /** Inclure aussi les WARNINGS (sinon ERRORS only). */
-        var injectDiagnosticsIncludeWarnings: Boolean = false
+        var injectDiagnosticsIncludeWarnings: Boolean = false,
+        /**
+         * Plafond hebdomadaire en $. 0 = pas de limite. Soft warning à 80%, hard stop à 100%
+         * (avec confirmation pour outrepasser). Calculé sur les events `total_cost_usd` cumulés.
+         */
+        var weeklyBudgetUsd: Double = 0.0,
+        /** Coût cumulé sur la semaine en cours (rolling 7 days). */
+        var currentWeekCostUsd: Double = 0.0,
+        /** Timestamp epoch ms du début de la semaine en cours (lundi 00:00 local). */
+        var currentWeekStartMs: Long = 0L,
+        /**
+         * Mode "Trust this session" : si true, claude lance avec
+         * `--dangerously-skip-permissions` → aucune card Allow/Deny, tout passe direct.
+         * Si false, claude lance avec `--permission-prompt-tool stdio` et nos cards
+         * sont affichées pour chaque Bash/MCP/etc. dangereux.
+         *
+         * Default false : par défaut on demande à l'user via cards. Cocher pour zéro friction
+         * (machine perso, contexte trusté).
+         */
+        var trustSession: Boolean = false
     )
 
     private var state = State()
@@ -77,6 +96,58 @@ class AgentSettings : PersistentStateComponent<AgentSettings.State> {
     var injectDiagnosticsIncludeWarnings: Boolean
         get() = state.injectDiagnosticsIncludeWarnings
         set(value) { state.injectDiagnosticsIncludeWarnings = value }
+
+    var weeklyBudgetUsd: Double
+        get() = state.weeklyBudgetUsd
+        set(value) { state.weeklyBudgetUsd = value }
+
+    var trustSession: Boolean
+        get() = state.trustSession
+        set(value) { state.trustSession = value }
+
+    /**
+     * Ajoute un coût au compteur de la semaine en cours. Si on bascule de semaine, reset
+     * le compteur. Retourne le nouveau total cumulé.
+     */
+    fun addToCurrentWeek(deltaUsd: Double): Double {
+        val now = System.currentTimeMillis()
+        val weekStart = startOfCurrentWeekMs()
+        if (state.currentWeekStartMs != weekStart) {
+            state.currentWeekStartMs = weekStart
+            state.currentWeekCostUsd = 0.0
+        }
+        state.currentWeekCostUsd += deltaUsd
+        return state.currentWeekCostUsd
+    }
+
+    fun currentWeekCostUsd(): Double {
+        val weekStart = startOfCurrentWeekMs()
+        if (state.currentWeekStartMs != weekStart) {
+            // Si la semaine a changé, on reset (lecture seule mais on aligne le state).
+            state.currentWeekStartMs = weekStart
+            state.currentWeekCostUsd = 0.0
+        }
+        return state.currentWeekCostUsd
+    }
+
+    fun resetWeekCounter() {
+        state.currentWeekStartMs = startOfCurrentWeekMs()
+        state.currentWeekCostUsd = 0.0
+    }
+
+    /** Lundi 00:00 local de la semaine courante en epoch ms. */
+    private fun startOfCurrentWeekMs(): Long {
+        val cal = java.util.Calendar.getInstance()
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        cal.set(java.util.Calendar.MINUTE, 0)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 0)
+        // Aligne sur lundi (DAY_OF_WEEK : SUNDAY=1, MONDAY=2)
+        val dow = cal.get(java.util.Calendar.DAY_OF_WEEK)
+        val mondayOffset = if (dow == java.util.Calendar.SUNDAY) -6 else java.util.Calendar.MONDAY - dow
+        cal.add(java.util.Calendar.DAY_OF_MONTH, mondayOffset)
+        return cal.timeInMillis
+    }
 
     fun getClaudeCliPathOrNull(): String? = claudeCliPath.takeIf { it.isNotBlank() }
     fun getNpxPathOrNull(): String? = npxPath.takeIf { it.isNotBlank() }

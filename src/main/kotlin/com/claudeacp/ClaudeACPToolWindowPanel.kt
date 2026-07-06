@@ -1,5 +1,11 @@
 package com.claudeacp
 
+import com.claudeacp.core.AgentState
+import com.claudeacp.core.ChatSession
+import com.claudeacp.core.PermissionRequest
+import com.claudeacp.core.SessionConfig
+import com.claudeacp.core.ToolCallInfo
+import com.claudeacp.core.UsageStats
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.ui.JBColor
@@ -8,37 +14,74 @@ import com.intellij.util.ui.UIUtil
 import java.awt.*
 import javax.swing.*
 
+/**
+ * Panel UI d'un chat. Possède SON propre ChatSession (= son backend isolé). Toutes les
+ * communications agent → UI passent par les callbacks du backend ; aucun listener global,
+ * aucun filtre par sessionId. Isolation totale entre chats par construction.
+ */
 class ClaudeACPToolWindowPanel(
     private val project: Project,
+    initialChatSession: ChatSession,
     private val isFirstChat: Boolean = true
 ) {
 
+    /** Mutable car l'user peut changer d'agent avant le 1er prompt → swap propre du backend. */
+    @Volatile
+    private var chatSession: ChatSession = initialChatSession
+    private val backend get() = chatSession.backend
     private val acpService = project.getService(ClaudeACPService::class.java)
     private val historyService = project.getService(PromptHistoryService::class.java)
     private val diffManager = project.getService(DiffViewerManager::class.java)
+
+    /** Close propre du backend, appelé par la factory à la fermeture du content. */
+    fun closeSession() {
+        chatSession.close()
+    }
+
+    /** Swap d'agent profile : kill backend courant, en spawne un nouveau avec le profile demandé.
+     *  Autorisé uniquement tant qu'aucun prompt n'a été envoyé (hasAutoRenamed == false). */
+    fun swapAgentProfile(newProfile: AgentProfile) {
+        if (hasAutoRenamed) {
+            chatPanel.appendError("Cannot switch agent after a prompt was sent. Open a new chat instead.")
+            return
+        }
+        PluginLogService.getInstance(project).info("panel",
+            "🔄 Swap agent profile: ${chatSession.profile.id} → ${newProfile.id}")
+        chatSession.close()
+        chatSession = ChatSession(project, newProfile)
+        wireBackend()
+        // Reset UI state pour le nouveau backend
+        statusLabel.text = "🚀 Starting…"
+        statusLabel.foreground = JBColor.foreground()
+        sessionLabel.isVisible = false
+        chatSession.start()
+        chatSession.sessionId?.let { updateSessionLabel(it) }
+    }
 
     private val chatPanel = ChatPanel(project) { toolUseId, replyText, switchModeTo ->
         // ExitPlanMode Approve / AskUserQuestion Submit / Skip / Reject : on envoie le
         // tool_result attendu par claude, et si demandé on switch le permission mode
         // (typiquement plan → acceptEdits après approbation). L'ordre compte : switch
         // d'abord pour que les Write/Edit suivants soient autorisés.
-        val sid = mySessionId
         if (switchModeTo != null) {
-            acpService.setMode(switchModeTo, sid)
+            chatSession.setMode(switchModeTo)
         }
-        acpService.replyToolResult(toolUseId, replyText, sid)
+        chatSession.replyToolResult(toolUseId, replyText)
     }
     private val pendingPanel = PendingChangesPanel(project)
     private val pendingService = project.getService(PendingChangesService::class.java)
 
-    /**
-     * sessionId que ce panel "possède". Chaque content de la tool window a son propre sid pour
-     * router correctement les chunks de Claude vers le bon onglet de chat.
-     */
-    @Volatile
-    private var mySessionId: String? = null
+    /** sessionId de notre chat, fourni par le backend. Stable dès la construction de ChatSession. */
+    private val mySessionId: String? get() = backend.sessionId
 
-    private val inputPanel = PromptInputPanel(project) { mySessionId }
+    private val inputPanel = PromptInputPanel(
+        project = project,
+        getMySessionId = { mySessionId },
+        setModelCallback = { chatSession.setModel(it) },
+        setModeCallback = { chatSession.setMode(it) },
+        setEffortCallback = { chatSession.setEffort(it) },
+        onAgentSwitchRequested = { newProfile -> swapAgentProfile(newProfile) }
+    )
 
     /** Callback set par la factory pour renommer le content (le tab) du tool window. */
     var renameContentCallback: ((String) -> Unit)? = null
@@ -47,13 +90,11 @@ class ClaudeACPToolWindowPanel(
     @Volatile
     private var hasAutoRenamed = false
 
-    fun setSessionId(sid: String) {
-        mySessionId = sid
-        // Refresh la config locale + label session id pour faciliter `claude --resume <sid>`
-        ApplicationManager.getApplication().invokeLater {
-            inputPanel.refreshConfig(acpService.getSessionConfig(sid))
-            updateSessionLabel(sid)
-        }
+    /** Affiche la card permission + active le bandeau "Waiting for approval". */
+    private fun showPermissionCard(req: PermissionRequest) {
+        chatPanel.appendPermissionRequest(req)
+        val preview = formatPermissionPreview(req.toolName, req.toolInput)
+        setActivityText("🔐 Waiting for your approval — $preview · click Allow/Deny in the chat ⬇")
     }
 
     private fun updateSessionLabel(sid: String) {
@@ -65,6 +106,14 @@ class ClaudeACPToolWindowPanel(
     }
 
     fun getSessionId(): String? = mySessionId
+
+    /** Compat ascendante : la factory utilisait setSessionId pour les chats 2+. Désormais
+     *  le sid est connu dès la construction du ChatSession, on logue juste pour debug. */
+    @Deprecated("ChatSession owns the sessionId. Kept as no-op for legacy callers.")
+    fun setSessionId(sid: String) {
+        PluginLogService.getInstance(project).debug("panel",
+            "Legacy setSessionId($sid) called — ignored (chatSession.sessionId=${chatSession.sessionId})")
+    }
 
     private val statusLabel = JLabel("⏸ Stopped").apply {
         font = font.deriveFont(Font.PLAIN, 11f)
@@ -146,7 +195,8 @@ class ClaudeACPToolWindowPanel(
         rootCard.add(chatRoot, "chat")
         rootCard.add(onboardingRoot, "onboarding")
 
-        wireListeners()
+        // Branche les callbacks du backend AVANT de le démarrer pour ne rien rater.
+        wireBackend()
 
         ApplicationManager.getApplication().invokeLater {
             checkPrerequisitesAndConnect()
@@ -166,16 +216,13 @@ class ClaudeACPToolWindowPanel(
         }
 
         showCard("chat")
-        if (acpService.state !in setOf(
-                ClaudeACPService.State.READY,
-                ClaudeACPService.State.STARTING,
-                ClaudeACPService.State.INITIALIZING,
-                ClaudeACPService.State.CREATING_SESSION
-            )
-        ) {
-            chatPanel.appendInfo("Connecting to AgentNav ACP...")
-            acpService.startAgent()
+        if (backend.state == AgentState.STOPPED || backend.state == AgentState.ERROR) {
+            chatPanel.appendInfo("Starting Claude…")
+            chatSession.start()
         }
+        // Le sid est connu dès la construction du ChatSession (preAssignedSid CLI),
+        // on peut donc afficher le label tout de suite.
+        mySessionId?.let { updateSessionLabel(it) }
     }
 
     private fun showCard(name: String) {
@@ -221,17 +268,8 @@ class ClaudeACPToolWindowPanel(
         root.add(bottom, BorderLayout.SOUTH)
 
         inputPanel.onSend { txt, atts ->
-            if (acpService.state != ClaudeACPService.State.READY) {
-                chatPanel.appendError("Agent not ready (state=${acpService.state})")
-                return@onSend
-            }
-            // En CLI mode, mySessionId est null tant que claude n'a pas émis son 1er
-            // system:init (peut arriver seulement après notre 1er user message). On
-            // autorise donc le 1er send même sans sid : le service trouvera le
-            // pendingCliProc et on claim le sid quand il arrive.
-            val isCliMode = acpService.activeProfile.transport == Transport.CLI_STREAM_JSON
-            if (mySessionId == null && !isCliMode) {
-                chatPanel.appendError("No session attached to this chat — try opening a new chat.")
+            if (backend.state != AgentState.READY) {
+                chatPanel.appendError("Agent not ready (state=${backend.state})")
                 return@onSend
             }
             if (!hasAutoRenamed) {
@@ -242,7 +280,6 @@ class ClaudeACPToolWindowPanel(
             chatPanel.appendUserMessage(txt)
             // Une fois la conversation démarrée, on verrouille le choix d'agent pour ce chat.
             inputPanel.lockAgent()
-            // Affiche aussi un petit récap des pièces jointes en dessous (chips)
             if (atts.isNotEmpty()) {
                 val names = atts.joinToString(", ") {
                     when (it) {
@@ -253,7 +290,6 @@ class ClaudeACPToolWindowPanel(
                 }
                 chatPanel.appendInfo("Attachments: $names")
             }
-            // Injection auto des diagnostics LSP du buffer courant (si activée).
             val settings = AgentSettings.getInstance()
             val enrichedText = if (settings.injectDiagnostics) {
                 val diags = EditorDiagnosticsGrabber.buildDiagnosticsContext(
@@ -262,12 +298,12 @@ class ClaudeACPToolWindowPanel(
                 )
                 if (diags != null) txt + diags else txt
             } else txt
-            acpService.sendPrompt(enrichedText, targetSessionId = mySessionId, attachments = atts)
+            if (!checkBudgetBeforeSend(settings)) return@onSend
+            chatSession.sendPrompt(enrichedText, atts)
         }
 
         inputPanel.onCancel {
-            // Cancel uniquement le prompt de NOTRE session, pas celui en cours global.
-            acpService.cancelPrompt(targetSessionId = mySessionId)
+            chatSession.cancel()
         }
 
         inputPanel.onSlashCommand { cmd, args ->
@@ -292,7 +328,7 @@ class ClaudeACPToolWindowPanel(
                         id = opt.id,
                         label = opt.name,
                         description = opt.description,
-                        onPick = { acpService.setModel(opt.id, targetSessionId = sid) }
+                        onPick = { chatSession.setModel(opt.id) }
                     )
                 }
                 chatPanel.appendSlashPicker(
@@ -308,7 +344,7 @@ class ClaudeACPToolWindowPanel(
                         id = opt.id,
                         label = opt.name,
                         description = opt.description,
-                        onPick = { acpService.setMode(opt.id, targetSessionId = sid) }
+                        onPick = { chatSession.setMode(opt.id) }
                     )
                 }
                 chatPanel.appendSlashPicker(
@@ -335,7 +371,7 @@ class ClaudeACPToolWindowPanel(
                         id = opt.id,
                         label = opt.name,
                         description = opt.description,
-                        onPick = { acpService.setConfigOption(effortOpt.id, opt.id, targetSessionId = sid) }
+                        onPick = { chatSession.setEffort(opt.id) }
                     )
                 }
                 chatPanel.appendSlashPicker(
@@ -431,194 +467,108 @@ class ClaudeACPToolWindowPanel(
         }
     }
 
-    private fun wireListeners() {
-        // Au switch d'agent : reset notre sessionId.
-        // Chat 1 → re-claim auto via le state listener ci-dessous.
-        // Chat 2+ → on schedule un newSession dès que le service redevient READY.
-        acpService.addAgentSwitchedListener {
-            mySessionId = null
-            inputPanel.refreshConfig(ClaudeACPService.SessionConfig())
-            if (!isFirstChat) {
-                schedulePostReadyNewSession()
-            }
-        }
+    /**
+     * Branche TOUS les callbacks du backend directement sur l'UI. Aucun listener global,
+     * aucun filtre par sid. C'est garanti par construction qu'on ne reçoit QUE nos events.
+     */
+    private fun wireBackend() {
+        val ui = ApplicationManager.getApplication()
 
-        // Pour Chat 1 : claim auto le sessionId initial du service dès qu'il devient READY.
-        // Ça évite que Chat 1 récupère par hasard le sessionId d'un Chat 2 créé entretemps.
-        if (isFirstChat) {
-            val claimListener = object : (ClaudeACPService.State) -> Unit {
-                override fun invoke(s: ClaudeACPService.State) {
-                    if (s == ClaudeACPService.State.READY && mySessionId == null) {
-                        val sid = acpService.sessionId
-                        if (sid != null) {
-                            setSessionId(sid)
-                        }
-                    }
-                }
-            }
-            acpService.addStateListener(claimListener)
-            // Catch-up si déjà READY au moment où on s'abonne
-            if (acpService.state == ClaudeACPService.State.READY && mySessionId == null) {
-                acpService.sessionId?.let { setSessionId(it) }
-            }
-            // En CLI mode : le sid arrive après le 1er user message (via system:init),
-            // donc on écoute aussi sessionCreatedListener pour claim à ce moment-là.
-            val firstSidClaim = object : (String) -> Unit {
-                override fun invoke(sid: String) {
-                    if (mySessionId == null) {
-                        setSessionId(sid)
-                        acpService.removeSessionCreatedListener(this)
-                    }
-                }
-            }
-            acpService.addSessionCreatedListener(firstSidClaim)
-        }
-
-        acpService.addStateListener { newState ->
-            ApplicationManager.getApplication().invokeLater {
+        backend.onStateChange = { newState ->
+            ui.invokeLater {
                 statusLabel.text = when (newState) {
-                    ClaudeACPService.State.STOPPED -> "⏸ Stopped"
-                    ClaudeACPService.State.STARTING -> "🚀 Starting..."
-                    ClaudeACPService.State.INITIALIZING -> "🤝 Initializing..."
-                    ClaudeACPService.State.CREATING_SESSION -> "📝 Creating session..."
-                    ClaudeACPService.State.READY -> "✅ Ready"
-                    ClaudeACPService.State.ERROR -> "❌ Error"
+                    AgentState.STOPPED -> "⏸ Stopped"
+                    AgentState.STARTING -> "🚀 Starting..."
+                    AgentState.INITIALIZING -> "🤝 Initializing..."
+                    AgentState.CREATING_SESSION -> "📝 Creating session..."
+                    AgentState.READY -> "✅ Ready"
+                    AgentState.ERROR -> "❌ Error"
                 }
                 statusLabel.foreground = when (newState) {
-                    ClaudeACPService.State.READY -> JBColor.GREEN
-                    ClaudeACPService.State.ERROR -> JBColor.RED
+                    AgentState.READY -> JBColor.GREEN
+                    AgentState.ERROR -> JBColor.RED
                     else -> JBColor.foreground()
                 }
-                inputPanel.setReady(newState == ClaudeACPService.State.READY)
-                // Pré-remplit Model/Mode/Effort/Skills/MCP dès READY pour que l'user puisse
-                // configurer AVANT d'envoyer le 1er prompt (claude n'émet system:init qu'après
-                // le 1er user message, sinon les dropdowns resteraient grisés au démarrage).
-                if (newState == ClaudeACPService.State.READY) {
-                    inputPanel.refreshConfig(acpService.getSessionConfig(mySessionId))
+                inputPanel.setReady(newState == AgentState.READY)
+                if (newState == AgentState.READY) {
+                    inputPanel.refreshConfig(backend.config)
                 }
             }
         }
 
-        // Les infos info() reste sur le 1er chat (status connexion etc.) pour pas spammer.
-        if (isFirstChat) {
-            acpService.addInfoListener { msg ->
-                ApplicationManager.getApplication().invokeLater { chatPanel.appendInfo(msg) }
-            }
-        }
-        // Erreurs et stderr : affichés sur TOUS les chats — sinon un chat resumé qui plante
-        // au boot (ex: --resume sans bon cwd) reste silencieux et l'user voit juste un cryptique
-        // "No Claude CLI process available" quand il prompte.
-        acpService.addErrorListener { msg ->
-            ApplicationManager.getApplication().invokeLater { chatPanel.appendError(msg) }
-        }
-        acpService.addStderrListener { msg ->
-            ApplicationManager.getApplication().invokeLater { chatPanel.appendStderr(msg) }
-        }
-        // Filtres par sessionId STRICT : si mySessionId est null, on n'affiche RIEN.
-        acpService.addMessageChunkListener { text, sid ->
-            if (matchesMySession(sid)) {
-                ApplicationManager.getApplication().invokeLater { chatPanel.appendAssistantChunk(text) }
-            }
-        }
-        acpService.addThoughtChunkListener { text, sid ->
-            if (matchesMySession(sid)) {
-                ApplicationManager.getApplication().invokeLater { chatPanel.appendThinkingChunk(text) }
-            }
-        }
-        acpService.addToolCallListener { info ->
-            if (matchesMySession(info.sessionId)) {
-                ApplicationManager.getApplication().invokeLater {
-                    chatPanel.appendToolCall(info)
-                    updateActivityBar(info)
-                }
-            }
-        }
-        acpService.addThoughtChunkListener { _, sid ->
-            if (matchesMySession(sid)) {
-                ApplicationManager.getApplication().invokeLater {
-                    setActivityText("🤔 Thinking…")
-                }
-            }
-        }
-        acpService.addMessageChunkListener { _, sid ->
-            // Quand claude commence à émettre du texte assistant, on cache le bandeau d'activité
-            // tool — il a "fini" de réfléchir/agir et il "parle".
-            if (matchesMySession(sid)) {
-                ApplicationManager.getApplication().invokeLater {
-                    setActivityText("✍ Writing reply…")
-                }
+        backend.onSessionReady = { sid ->
+            ui.invokeLater {
+                updateSessionLabel(sid)
+                inputPanel.refreshConfig(backend.config)
             }
         }
 
-        // Quand un tool est bloqué (Bash hors cwd, etc.), claude renvoie un tool_result is_error.
-        // On affiche le message dans le chat pour que l'user comprenne pourquoi sa commande
-        // n'a pas tourné (au lieu de voir juste un Tools (1) silencieux).
-        acpService.addToolResultErrorListener { msg, sid ->
-            if (matchesMySession(sid)) {
-                ApplicationManager.getApplication().invokeLater { chatPanel.appendError(msg) }
+        backend.onTextChunk = { text ->
+            ui.invokeLater {
+                chatPanel.appendAssistantChunk(text)
+                setActivityText("✍ Writing reply…")
             }
         }
 
-        // Config par sid : refresh des dropdowns Model/Mode/Effort uniquement pour notre session.
-        acpService.addSessionConfigListener { sid, config ->
-            if (sid != null && sid == mySessionId) {
-                ApplicationManager.getApplication().invokeLater {
-                    inputPanel.refreshConfig(config)
-                }
+        backend.onThoughtChunk = { text ->
+            ui.invokeLater {
+                chatPanel.appendThinkingChunk(text)
+                setActivityText("🤔 Thinking…")
             }
         }
 
-        // Executing : on accepte l'event si sid matche notre chat, OU si on n'a pas encore claim
-        // de sid (cas resume/Chat 2+ avant le 1er system:init). Le user a explicitement demandé
-        // « stop quoi qu'il arrive » → on privilégie l'affichage du ⏹ même si le routing par sid
-        // n'est pas encore résolu. cancelCliPrompt fait son propre fallback pour trouver le proc.
-        acpService.addExecutingListener { executing, sid ->
-            val matches = sid == mySessionId || mySessionId == null
-            if (matches) {
-                ApplicationManager.getApplication().invokeLater {
-                    inputPanel.setExecutingState(executing)
-                    if (executing) {
-                        setActivityText("🤔 Thinking…")
-                    } else {
-                        hideActivityBar()
-                    }
-                }
+        backend.onToolCall = { info ->
+            ui.invokeLater {
+                chatPanel.appendToolCall(info)
+                updateActivityBar(info)
+                watchStuckTool(info)
             }
         }
 
-        // Card de modification de fichier dans le chat de la session concernée
+        backend.onPermission = { req ->
+            ui.invokeLater {
+                showPermissionCard(req)
+            }
+        }
+
+        backend.onExecuting = { exec ->
+            ui.invokeLater {
+                inputPanel.setExecutingState(exec)
+                if (exec) setActivityText("🤔 Thinking…") else hideActivityBar()
+            }
+        }
+
+        backend.onConfigChange = { config ->
+            ui.invokeLater {
+                inputPanel.refreshConfig(config)
+            }
+        }
+
+        backend.onUsage = { stats ->
+            ui.invokeLater { renderUsage(stats) }
+        }
+
+        backend.onInfo = { msg ->
+            ui.invokeLater { chatPanel.appendInfo(msg) }
+        }
+
+        backend.onError = { msg ->
+            ui.invokeLater { chatPanel.appendError(msg) }
+        }
+
+        backend.onStderr = { msg ->
+            ui.invokeLater { chatPanel.appendStderr(msg) }
+        }
+
+        backend.onToolResultError = { msg ->
+            ui.invokeLater { chatPanel.appendError(msg) }
+        }
+
+        // PendingChange (diff inline + side panel) — vient de PendingChangesService project-level
+        // mais filtré par sid du change (les backends taggent leur sid à l'addOrUpdate).
         pendingService.addAddedListener { change ->
-            if (matchesMySession(change.triggeredBySessionId)) {
-                ApplicationManager.getApplication().invokeLater { chatPanel.appendFileChange(change) }
-            }
-        }
-
-        // Permission request (--permission-prompt-tool stdio) → carte Allow/Deny inline
-        acpService.addPermissionRequestListener { req ->
-            if (matchesMySession(req.sessionId)) {
-                ApplicationManager.getApplication().invokeLater {
-                    chatPanel.appendPermissionRequest(req)
-                }
-            }
-        }
-
-        // Session rebound : quand le sid de notre chat change (ex: respawn claude --resume
-        // après changement de model), on met à jour notre mySessionId pour continuer à
-        // recevoir les events.
-        acpService.addSessionReboundListener { oldSid, newSid ->
-            if (mySessionId == oldSid) {
-                mySessionId = newSid
-                ApplicationManager.getApplication().invokeLater {
-                    inputPanel.refreshConfig(acpService.getSessionConfig(newSid))
-                    renderUsage(acpService.getSessionUsage(newSid))
-                }
-            }
-        }
-
-        // Indicateur tokens/coût discret en haut à droite, mis à jour à chaque turn.
-        acpService.addUsageListener { sid, stats ->
-            if (sid == mySessionId) {
-                ApplicationManager.getApplication().invokeLater { renderUsage(stats) }
+            if (change.triggeredBySessionId == mySessionId) {
+                ui.invokeLater { chatPanel.appendFileChange(change) }
             }
         }
     }
@@ -630,9 +580,71 @@ class ClaudeACPToolWindowPanel(
 
     private fun hideActivityBar() {
         activityBar.isVisible = false
+        // Quand l'exécution s'arrête, on clear aussi les watchers stuck.
+        stuckTools.clear()
     }
 
-    private fun updateActivityBar(info: ClaudeACPService.ToolCallInfo) {
+    /** Tools actuellement in_progress + leur timestamp de démarrage. Pour le watchdog. */
+    private val stuckTools = java.util.concurrent.ConcurrentHashMap<String, StuckEntry>()
+    private data class StuckEntry(val name: String, val detail: String?, val startMs: Long, var warned: Boolean = false)
+
+    /**
+     * Watchdog : si un tool reste in_progress > 30s, on push un message d'aide dans le chat
+     * qui explique ce qui se passe et les causes probables (permission, network, infinite
+     * loop). Évite que l'user reste perdu devant un "Running" silencieux.
+     */
+    private fun watchStuckTool(info: ToolCallInfo) {
+        val id = info.toolCallId ?: return
+        when (info.status) {
+            "in_progress" -> {
+                stuckTools[id] = StuckEntry(info.title, info.path ?: info.command ?: info.detail, System.currentTimeMillis())
+                // Schedule un check à 30s
+                javax.swing.Timer(30_000) { _ ->
+                    val entry = stuckTools[id] ?: return@Timer
+                    if (entry.warned) return@Timer
+                    entry.warned = true
+                    val elapsed = (System.currentTimeMillis() - entry.startMs) / 1000
+                    val detail = entry.detail?.let { " · $it" } ?: ""
+                    val causes = stuckCauseHints(entry.name)
+                    chatPanel.appendInfo(
+                        "⏱ Tool '${entry.name}'$detail has been running for ${elapsed}s.\n" +
+                            "Common causes: $causes"
+                    )
+                }.apply { isRepeats = false }.start()
+            }
+            "completed", "error", "failed" -> stuckTools.remove(id)
+            else -> {}
+        }
+    }
+
+    /** Hints contextualisés selon le tool pour aider l'user à débloquer. */
+    private fun stuckCauseHints(toolName: String): String = when (toolName) {
+        "Bash" -> "(1) permission request not shown — check for a yellow Allow/Deny card above; " +
+            "(2) command is an interactive prompt (vim, less, etc.) — Bash blocked; " +
+            "(3) network call timeout. Action: click ⏹ Stop and reformulate."
+        "WebFetch", "WebSearch" -> "Network timeout or upstream blocking. Action: ⏹ Stop and retry."
+        "Read" -> "File is huge or locked by another process. Action: ⏹ Stop and ask Claude to read a smaller range."
+        "Edit", "Write", "MultiEdit" -> "File write denied (permissions) or a hook is hanging. Check the Logs panel."
+        "Task" -> "Sub-agent is itself stuck. Action: ⏹ Stop, then ask the parent agent to retry without delegation."
+        else -> "Unknown blocker. Try ⏹ Stop, or open the Logs panel (🖥 in title bar) for details."
+    }
+
+    /** Petit preview du tool input pour le bandeau permission. */
+    private fun formatPermissionPreview(toolName: String, toolInput: String?): String {
+        if (toolInput.isNullOrBlank()) return toolName
+        return try {
+            val obj = com.google.gson.JsonParser.parseString(toolInput).asJsonObject
+            val main = when (toolName) {
+                "Bash" -> obj.get("command")?.asString
+                "Read", "Edit", "Write", "MultiEdit" ->
+                    obj.get("file_path")?.asString ?: obj.get("path")?.asString
+                else -> obj.entrySet().firstOrNull()?.let { "${it.key}=${it.value}" }
+            }
+            "$toolName: ${main?.take(60) ?: ""}"
+        } catch (_: Exception) { toolName }
+    }
+
+    private fun updateActivityBar(info: ToolCallInfo) {
         // Si le tool est completed, on revient à "Thinking" en attendant la suite ou la fin.
         if (info.status == "completed" || info.status == "error") {
             setActivityText("🤔 Thinking…")
@@ -794,7 +806,42 @@ class ClaudeACPToolWindowPanel(
         return sb.toString()
     }
 
-    private fun renderUsage(stats: ClaudeACPService.UsageStats) {
+    /**
+     * Retourne true si on peut envoyer le prompt, false si l'user annule à cause du budget.
+     * Logique :
+     *  - budget == 0 → pas de cap, toujours OK
+     *  - cumul < 80% → silent OK
+     *  - 80% ≤ cumul < 100% → warning info dans le chat (continue quand même)
+     *  - cumul ≥ 100% → dialog Yes/No "Continue past budget?"
+     */
+    private fun checkBudgetBeforeSend(settings: AgentSettings): Boolean {
+        val budget = settings.weeklyBudgetUsd
+        if (budget <= 0.0) return true
+        val cost = settings.currentWeekCostUsd()
+        val ratio = cost / budget
+        when {
+            ratio >= 1.0 -> {
+                val choice = com.intellij.openapi.ui.Messages.showYesNoDialog(
+                    project,
+                    "Weekly budget reached: $%.2f / $%.2f (%.0f%%).\n\nContinue this turn anyway?"
+                        .format(cost, budget, ratio * 100),
+                    "Budget cap reached",
+                    "Continue", "Stop",
+                    com.intellij.openapi.ui.Messages.getWarningIcon()
+                )
+                if (choice != com.intellij.openapi.ui.Messages.YES) {
+                    chatPanel.appendInfo("Prompt cancelled (weekly budget reached).")
+                    return false
+                }
+            }
+            ratio >= 0.8 -> {
+                chatPanel.appendInfo("⚠ Budget warning: $%.2f / $%.2f (%.0f%%)".format(cost, budget, ratio * 100))
+            }
+        }
+        return true
+    }
+
+    private fun renderUsage(stats: UsageStats) {
         if (stats.turnCount == 0) {
             usageLabel.isVisible = false
             return
@@ -815,19 +862,6 @@ class ClaudeACPToolWindowPanel(
         usageLabel.isVisible = true
     }
 
-    /** Pour Chat 2+ après un switch d'agent : recrée une session quand le service est de nouveau READY. */
-    private fun schedulePostReadyNewSession() {
-        val listener = object : (ClaudeACPService.State) -> Unit {
-            override fun invoke(s: ClaudeACPService.State) {
-                if (s == ClaudeACPService.State.READY) {
-                    acpService.removeStateListener(this)
-                    acpService.newSession { newSid -> setSessionId(newSid) }
-                }
-            }
-        }
-        acpService.addStateListener(listener)
-    }
-
     /** Renommé manuellement par l'utilisateur (action "Rename Chat"). */
     fun renameChat(newName: String) {
         hasAutoRenamed = true // empêche l'auto-rename ultérieur
@@ -839,10 +873,13 @@ class ClaudeACPToolWindowPanel(
         inputPanel.addAttachmentExternal(att)
     }
 
-    /** Strict : ce panel n'affiche QUE les events de son propre sessionId. */
-    private fun matchesMySession(chunkSid: String?): Boolean {
-        val my = mySessionId ?: return false
-        return chunkSid == my
+    /** True si ce panel correspond à l'onglet actuellement sélectionné dans la tool window. */
+    private fun isCurrentlySelectedInToolWindow(): Boolean {
+        val tw = com.intellij.openapi.wm.ToolWindowManager.getInstance(project)
+            .getToolWindow("AgentNav ACP") ?: return false
+        val selected = tw.contentManager.selectedContent ?: return false
+        val selectedPanel = selected.getUserData(ClaudeACPToolWindowFactory.PANEL_KEY)
+        return selectedPanel === this
     }
 
     private fun showHistoryPopup() {

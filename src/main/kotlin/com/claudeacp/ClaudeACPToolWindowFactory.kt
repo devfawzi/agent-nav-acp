@@ -1,5 +1,7 @@
 package com.claudeacp
 
+import com.claudeacp.core.AgentState
+import com.claudeacp.core.ChatSession
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
@@ -42,7 +44,16 @@ class ClaudeACPToolWindowFactory : ToolWindowFactory, DumbAware {
         initialTitle: String? = null
     ): Content {
         val n = sessionCounter.getAndIncrement()
-        val panel = ClaudeACPToolWindowPanel(project, isFirstChat = (n == 1))
+        // Chaque chat = sa propre session backend isolée. Le sessionId est connu dès la
+        // construction (preAssignedSid CLI). resumeSid != null = reprise d'une conv stockée.
+        val profile = AgentProfilesService.getInstance().getActiveProfile()
+        val chatSession = ChatSession(
+            project = project,
+            profile = profile,
+            resumeSid = resumeSid,
+            cwdOverride = resumeCwd
+        )
+        val panel = ClaudeACPToolWindowPanel(project, chatSession, isFirstChat = (n == 1))
         val displayTitle = initialTitle ?: "Chat $n"
         val content = ContentFactory.getInstance().createContent(
             panel.getContent(),
@@ -58,42 +69,15 @@ class ClaudeACPToolWindowFactory : ToolWindowFactory, DumbAware {
             toolWindow.contentManager.contents.forEach { it.isCloseable = true }
         }
 
-        // Callback pour permettre au panel de renommer son content (sur 1er prompt ou rename manuel)
+        // Cleanup à la fermeture du tab : kill process backend + libère VFS listeners.
+        // On passe par panel.closeSession() pour respecter le ChatSession courant
+        // (l'user peut avoir swap d'agent → chatSession local n'est plus le bon).
+        content.setDisposer {
+            panel.closeSession()
+        }
+
         panel.renameContentCallback = { newName ->
             content.displayName = newName
-        }
-
-        val acpService = project.getService(ClaudeACPService::class.java)
-
-        if (resumeSid != null) {
-            // Reprise : spawn un nouveau process avec --resume <sid>. Pour Chat 1, on doit
-            // stopper le process initial créé par startAgent() pour repartir sur le resume.
-            // Pour Chat 2+, on resume directement (le service supporte les multi-process CLI).
-            if (n == 1 && acpService.state != ClaudeACPService.State.STOPPED) {
-                acpService.stopAgent()
-            }
-            acpService.resumeCliSession(resumeSid, cwdOverride = resumeCwd) { newSid ->
-                panel.setSessionId(newSid)
-            }
-            return content
-        }
-
-        if (n > 1) {
-            // Crée la session immédiatement si possible, sinon attend que le service soit READY.
-            if (acpService.state == ClaudeACPService.State.READY ||
-                acpService.state == ClaudeACPService.State.CREATING_SESSION) {
-                acpService.newSession { newSid -> panel.setSessionId(newSid) }
-            } else {
-                val listener = object : (ClaudeACPService.State) -> Unit {
-                    override fun invoke(s: ClaudeACPService.State) {
-                        if (s == ClaudeACPService.State.READY) {
-                            acpService.removeStateListener(this)
-                            acpService.newSession { newSid -> panel.setSessionId(newSid) }
-                        }
-                    }
-                }
-                acpService.addStateListener(listener)
-            }
         }
 
         return content

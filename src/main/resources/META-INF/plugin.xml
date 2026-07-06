@@ -43,10 +43,14 @@
 
         <h3>Requirements</h3>
         <ul>
-            <li>Claude Code CLI installed (<code>curl -fsSL https://claude.ai/install.sh | bash</code>),
-                signed in once via <code>claude</code>.</li>
+            <li><b>Claude Code CLI ≥ 2.1.0</b> (<code>curl -fsSL https://claude.ai/install.sh | bash</code>),
+                signed in once via <code>claude</code>. The plugin relies on the bidirectional
+                <code>stream-json</code> protocol introduced in 2.1 (<code>control_request</code> /
+                <code>can_use_tool</code> permission flow). Versions &lt; 2.1 will not surface
+                Allow/Deny cards correctly.</li>
             <li>Optional: <code>npx</code> in PATH (auto-detected from nvm/volta) for OpenCode
                 and MCP servers spawned via npm.</li>
+            <li>JetBrains IDE 2024.2 or newer.</li>
         </ul>
 
         <p>Open <i>Tools → AgentNav ACP</i> for settings, or use the tool window on the

@@ -219,11 +219,17 @@ class SlashCommandPopup(
         val picked = list.selectedValue ?: return
         when {
             picked.submenuProvider != null -> {
-                // Drill-down dans le même popup
+                // Drill-down dans le même popup. On vide le textarea car le filter (`/m`)
+                // n'a plus de sens une fois qu'on est dans un sous-menu — sinon il reste
+                // dans le textarea et pollue les futures actions (ex: insertText prepend).
+                owner.text = ""
                 openSubmenu(picked.name, picked.submenuProvider.invoke())
             }
             picked.onActivate != null -> {
                 hide()
+                // Idem : vide le textarea avant d'invoquer l'action terminal pour que les
+                // insertText/sendDirectly partent d'un état propre.
+                owner.text = ""
                 picked.onActivate.invoke()
             }
             else -> {

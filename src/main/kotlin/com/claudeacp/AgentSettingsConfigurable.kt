@@ -34,6 +34,10 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
     private val mcpConfigField = TextFieldWithBrowseButton()
     private val injectDiagnosticsCheck = JCheckBox("Auto-inject editor errors/warnings into prompts")
     private val includeWarningsCheck = JCheckBox("Include warnings (not just errors)")
+    private val trustSessionCheck = JCheckBox(
+        "Trust this session — auto-approve all tools (no Allow/Deny prompts)")
+    private val weeklyBudgetField = JTextField(8)
+    private val weeklyBudgetStatusLabel = JBLabel("")
     private val claudeDetectedLabel = JBLabel("")
     private val npxDetectedLabel = JBLabel("")
     private val opencodeDetectedLabel = JBLabel("")
@@ -135,6 +139,21 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
                 comment("Servers come from your <code>--mcp-config</code> file. Tools are cached from the last Claude session (sent your 1st prompt yet).")
             }
         }
+        group("Permission mode (Claude Code only)") {
+            row {
+                text(
+                    "<b>Trust mode</b> (default): Claude lance avec <code>--dangerously-skip-permissions</code>. " +
+                        "Tout est exécuté direct, aucun blocage, aucune card Allow/Deny. " +
+                        "Recommandé pour usage perso.<br>" +
+                        "<b>Safe mode</b> (uncheck): nous demande confirmation via card Allow/Deny pour " +
+                        "chaque commande Bash / outil MCP sensible. Plus sécurisé mais peut bloquer le flow."
+                )
+            }
+            row { cell(trustSessionCheck) }
+            row {
+                comment("⚠ Switching this mode respawns the Claude process — current chats restart on --resume.")
+            }
+        }
         group("Editor context injection") {
             row {
                 text(
@@ -145,6 +164,20 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
             }
             row { cell(injectDiagnosticsCheck) }
             row { cell(includeWarningsCheck) }
+        }
+        group("Weekly budget cap") {
+            row {
+                text(
+                    "Set a soft weekly budget (USD). Soft warning at 80%, confirmation prompt at 100%. " +
+                        "Set to 0 to disable. Cumulative tracking via Claude's <code>total_cost_usd</code>. " +
+                        "Resets every Monday 00:00."
+                )
+            }
+            row("Weekly budget (USD):") {
+                cell(weeklyBudgetField)
+                button("Reset week counter") { binarySettings.resetWeekCounter(); refreshBudgetStatus() }
+            }
+            row("") { cell(weeklyBudgetStatusLabel) }
         }
         group("Binaries auto-discovery") {
             row {
@@ -172,10 +205,30 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
         mcpConfigField.text = binarySettings.mcpConfigPath
         injectDiagnosticsCheck.isSelected = binarySettings.injectDiagnostics
         includeWarningsCheck.isSelected = binarySettings.injectDiagnosticsIncludeWarnings
+        trustSessionCheck.isSelected = binarySettings.trustSession
+        weeklyBudgetField.text = if (binarySettings.weeklyBudgetUsd > 0) binarySettings.weeklyBudgetUsd.toString() else ""
         refreshDetectedLabels()
         refreshMcpStatus()
         refreshMcpInventory()
+        refreshBudgetStatus()
         refreshProfilesList()
+    }
+
+    private fun refreshBudgetStatus() {
+        val budget = binarySettings.weeklyBudgetUsd
+        val current = binarySettings.currentWeekCostUsd()
+        weeklyBudgetStatusLabel.text = if (budget <= 0.0) {
+            "<html><i>No cap. Current week cost: \$%.4f</i></html>".format(current)
+        } else {
+            val pct = (current / budget * 100).coerceAtLeast(0.0)
+            val color = when {
+                pct >= 100 -> "#c62828"
+                pct >= 80 -> "#f57c00"
+                else -> "gray"
+            }
+            "<html><span style='color:$color'>\$%.2f / \$%.2f used (%.0f%%)</span></html>"
+                .format(current, budget, pct)
+        }
     }
 
     /**
@@ -287,7 +340,9 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
             opencodeField.text != binarySettings.opencodePath ||
             mcpConfigField.text != binarySettings.mcpConfigPath ||
             injectDiagnosticsCheck.isSelected != binarySettings.injectDiagnostics ||
-            includeWarningsCheck.isSelected != binarySettings.injectDiagnosticsIncludeWarnings
+            includeWarningsCheck.isSelected != binarySettings.injectDiagnosticsIncludeWarnings ||
+            trustSessionCheck.isSelected != binarySettings.trustSession ||
+            parseBudget(weeklyBudgetField.text) != binarySettings.weeklyBudgetUsd
     }
 
     override fun apply() {
@@ -297,9 +352,15 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
         binarySettings.mcpConfigPath = mcpConfigField.text.trim()
         binarySettings.injectDiagnostics = injectDiagnosticsCheck.isSelected
         binarySettings.injectDiagnosticsIncludeWarnings = includeWarningsCheck.isSelected
+        binarySettings.trustSession = trustSessionCheck.isSelected
+        binarySettings.weeklyBudgetUsd = parseBudget(weeklyBudgetField.text)
         refreshDetectedLabels()
         refreshMcpStatus()
+        refreshBudgetStatus()
     }
+
+    private fun parseBudget(text: String): Double =
+        text.trim().toDoubleOrNull()?.coerceAtLeast(0.0) ?: 0.0
 
     private fun refreshMcpStatus() {
         val path = mcpConfigField.text.trim()

@@ -1,5 +1,8 @@
 package com.claudeacp
 
+import com.claudeacp.core.AgentState
+import com.claudeacp.core.ChatFonts
+import com.claudeacp.core.SessionConfig
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
@@ -46,7 +49,13 @@ import javax.swing.border.AbstractBorder
  */
 class PromptInputPanel(
     private val project: Project,
-    private val getMySessionId: () -> String?
+    private val getMySessionId: () -> String?,
+    private val setModelCallback: ((String) -> Unit)? = null,
+    private val setModeCallback: ((String) -> Unit)? = null,
+    private val setEffortCallback: ((String) -> Unit)? = null,
+    /** Quand l'user pick un nouvel agent profile dans le dropdown, le panel parent reçoit
+     *  ce callback pour swap son ChatSession backend. Si null, fallback legacy switchAgent. */
+    private val onAgentSwitchRequested: ((AgentProfile) -> Unit)? = null
 ) {
 
     private val log = thisLogger()
@@ -55,14 +64,14 @@ class PromptInputPanel(
     private val textArea = JTextArea(3, 0).apply {
         lineWrap = true
         wrapStyleWord = true
-        font = Font(Font.SANS_SERIF, Font.PLAIN, 13)
+        font = ChatFonts.regular(13)
         border = JBUI.Borders.empty(8, 10)
         background = UIUtil.getTextFieldBackground()
     }
 
     // Cached config — utilisée pour résoudre les slash commands au moment du send.
     @Volatile
-    private var currentConfig: ClaudeACPService.SessionConfig = ClaudeACPService.SessionConfig()
+    private var currentConfig: SessionConfig = SessionConfig()
 
     /** Label discret à droite du textarea pour rappeler que `/` ouvre les commandes. */
     private val slashHintLabel = JLabel("type / for commands").apply {
@@ -117,7 +126,7 @@ class PromptInputPanel(
     private var onSlashCommand: ((cmd: String, args: String) -> Unit)? = null
 
     /** Slash commands interceptés par le plugin (ne sont PAS envoyés à claude). */
-    private val PLUGIN_SLASH_COMMANDS = setOf("mode", "model", "effort", "skill", "skills", "mcp")
+    private val PLUGIN_SLASH_COMMANDS = setOf("mode", "model", "effort", "skill", "skills", "mcp", "agent")
 
     private val fileMentionPopup = FileMentionPopup(project, textArea) { entry ->
         replaceMentionToken(entry)
@@ -217,13 +226,13 @@ class PromptInputPanel(
         // La config (Model/Mode/Effort) et l'état d'exécution sont push par le panel parent
         // via refreshConfig() et setExecutingState() — filtrés par sessionId pour éviter le
         // cross-talk entre chats.
-        updateButtons(ClaudeACPService.SessionConfig())
+        updateButtons(SessionConfig())
 
         return root
     }
 
     /** Refresh des dropdowns Model/Mode/Effort pour la config courante de notre session. */
-    fun refreshConfig(config: ClaudeACPService.SessionConfig) {
+    fun refreshConfig(config: SessionConfig) {
         updateButtons(config)
     }
 
@@ -339,6 +348,12 @@ class PromptInputPanel(
                 description = "Browse skills & slash commands",
                 isPlugin = true,
                 submenuProvider = { buildSkillsSubmenu() }
+            ),
+            SlashCommandPopup.Entry(
+                name = "agent",
+                description = "Invoke a sub-agent (Explore, Plan, …) on a specific task",
+                isPlugin = true,
+                submenuProvider = { buildAgentSubmenu() }
             )
         )
         val skillSet = currentConfig.skills.toSet()
@@ -361,7 +376,10 @@ class PromptInputPanel(
                 description = opt.description ?: opt.id,
                 isPlugin = false,
                 checked = opt.id == currentConfig.currentModelId,
-                onActivate = { acpService.setModel(opt.id, targetSessionId = sid) }
+                onActivate = {
+                    if (setModelCallback != null) setModelCallback.invoke(opt.id)
+                    else acpService.setModel(opt.id, targetSessionId = sid)
+                }
             )
         }
     }
@@ -374,7 +392,10 @@ class PromptInputPanel(
                 description = opt.description ?: opt.id,
                 isPlugin = false,
                 checked = opt.id == currentConfig.currentModeId,
-                onActivate = { acpService.setMode(opt.id, targetSessionId = sid) }
+                onActivate = {
+                    if (setModeCallback != null) setModeCallback.invoke(opt.id)
+                    else acpService.setMode(opt.id, targetSessionId = sid)
+                }
             )
         }
     }
@@ -391,7 +412,10 @@ class PromptInputPanel(
                 description = opt.description ?: opt.id,
                 isPlugin = false,
                 checked = opt.id == effortOpt.currentValue,
-                onActivate = { acpService.setConfigOption(effortOpt.id, opt.id, targetSessionId = sid) }
+                onActivate = {
+                    if (setEffortCallback != null) setEffortCallback.invoke(opt.id)
+                    else acpService.setConfigOption(effortOpt.id, opt.id, targetSessionId = sid)
+                }
             )
         }
     }
@@ -447,6 +471,40 @@ class PromptInputPanel(
             ))
         }
         return out
+    }
+
+    private fun buildAgentSubmenu(): List<SlashCommandPopup.Entry> {
+        val agents = currentConfig.agents
+        if (agents.isEmpty()) {
+            return listOf(SlashCommandPopup.Entry(
+                name = "(no agents detected)",
+                description = "Send a first prompt so Claude loads its agent list",
+                isPlugin = false
+            ))
+        }
+        return agents.sorted().map { agentName ->
+            // Description courte par agent. Claude expose `Explore`, `general-purpose`, `Plan`,
+            // `statusline-setup`, et les agents custom du user. Description heuristique.
+            val desc = when (agentName.lowercase()) {
+                "explore" -> "Read-only investigator — searches and reads code without modifying"
+                "general-purpose" -> "Default Task agent for multi-step research/refactor"
+                "plan" -> "Designs an implementation plan before coding"
+                "statusline-setup" -> "Configures the IDE statusline"
+                "code-reviewer" -> "Reviews diffs and suggests improvements"
+                else -> "Custom or built-in sub-agent"
+            }
+            SlashCommandPopup.Entry(
+                name = agentName,
+                description = desc,
+                isPlugin = false,
+                icon = "🤖",
+                onActivate = {
+                    // Insert un prompt template qui invoque le Task tool avec ce subagent_type.
+                    // Claude détecte cette intent et lance Task(subagent_type="X", prompt="…").
+                    insertText("Use the $agentName sub-agent to ")
+                }
+            )
+        }
     }
 
     private fun buildSkillsSubmenu(): List<SlashCommandPopup.Entry> {
@@ -961,12 +1019,12 @@ class PromptInputPanel(
 
     // ── Config cache (les anciens dropdowns sont remplacés par les slash commands) ───
 
-    private fun updateButtons(config: ClaudeACPService.SessionConfig) {
+    private fun updateButtons(config: SessionConfig) {
         currentConfig = config
     }
 
     /** Exposé pour ClaudeACPToolWindowPanel afin de résoudre les slash commands. */
-    fun getCurrentConfig(): ClaudeACPService.SessionConfig = currentConfig
+    fun getCurrentConfig(): SessionConfig = currentConfig
 
     /** Insère du texte au début du textarea et focus. Utilisé par les SlashPickerCards. */
     fun insertText(text: String) {
@@ -1009,23 +1067,16 @@ class PromptInputPanel(
             item.toolTipText = profile.fullCommandLine()
             item.addActionListener {
                 if (profile.id != active.id) {
-                    // Single-process : switcher d'agent kill le process courant et donc TOUS les
-                    // autres chats qui l'utilisaient. On prévient l'user avant.
-                    if (acpService.state == ClaudeACPService.State.READY ||
-                        acpService.state == ClaudeACPService.State.INITIALIZING ||
-                        acpService.state == ClaudeACPService.State.CREATING_SESSION) {
-                        val choice = com.intellij.openapi.ui.Messages.showYesNoDialog(
-                            "Switching to '${profile.displayName}' will stop the current " +
-                                "'${active.displayName}' process and end all other chats using it.\n\n" +
-                                "Continue?",
-                            "Switch agent",
-                            com.intellij.openapi.ui.Messages.getWarningIcon()
-                        )
-                        if (choice != com.intellij.openapi.ui.Messages.YES) return@addActionListener
-                    }
+                    // Nouvelle archi : 1 panel = 1 ChatSession. Le swap d'agent ne touche
+                    // que CE chat (pas les autres). Pas de dialog warning : c'est isolé.
                     service.setActiveProfile(profile.id)
                     updateAgentButtonLabel()
-                    acpService.switchAgent(profile)
+                    if (onAgentSwitchRequested != null) {
+                        onAgentSwitchRequested.invoke(profile)
+                    } else {
+                        // Fallback legacy (ne devrait plus être atteint)
+                        acpService.switchAgent(profile)
+                    }
                 }
             }
             menu.add(item)

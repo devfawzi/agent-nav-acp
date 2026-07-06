@@ -1,5 +1,13 @@
 package com.claudeacp
 
+import com.claudeacp.core.AgentState
+import com.claudeacp.core.ConfigOption
+import com.claudeacp.core.McpServerInfo
+import com.claudeacp.core.PermissionRequest
+import com.claudeacp.core.SelectOption
+import com.claudeacp.core.SessionConfig
+import com.claudeacp.core.ToolCallInfo
+import com.claudeacp.core.UsageStats
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.intellij.execution.configurations.GeneralCommandLine
@@ -23,6 +31,9 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
+/** Alias court pour le legacy code qui référence State sans qualifier. */
+typealias State = AgentState
+
 /**
  * Service principal qui gère deux transports selon le profile actif :
  *  - CLI_STREAM_JSON (Claude Code) : spawn `claude --output-format stream-json` direct.
@@ -35,8 +46,6 @@ import java.util.concurrent.atomic.AtomicLong
  */
 @Service(Service.Level.PROJECT)
 class ClaudeACPService(private val project: Project) {
-
-    enum class State { STOPPED, STARTING, INITIALIZING, CREATING_SESSION, READY, ERROR }
 
     private val log = thisLogger()
     private var processHandler: OSProcessHandler? = null
@@ -79,21 +88,6 @@ class ClaudeACPService(private val project: Project) {
 
     fun addToolResultErrorListener(l: (String, String?) -> Unit) { toolResultErrorListeners.add(l) }
 
-    /**
-     * Usage cumulé par session : tokens input/output et coût $. Mis à jour à chaque event
-     * `result` reçu de claude. Permet d'afficher un indicateur discret dans le header.
-     */
-    data class UsageStats(
-        val inputTokens: Long = 0,
-        val outputTokens: Long = 0,
-        val cacheReadTokens: Long = 0,
-        val cacheCreationTokens: Long = 0,
-        val totalCostUsd: Double = 0.0,
-        val turnCount: Int = 0
-    ) {
-        val totalTokens: Long get() = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens
-    }
-
     private val sessionUsage = ConcurrentHashMap<String, UsageStats>()
     private val usageListeners = mutableListOf<(sessionId: String, UsageStats) -> Unit>()
 
@@ -132,68 +126,10 @@ class ClaudeACPService(private val project: Project) {
         )
     }
 
-    data class SelectOption(val id: String, val name: String, val description: String? = null)
-
-    data class SessionConfig(
-        val models: List<SelectOption> = emptyList(),
-        val modes: List<SelectOption> = emptyList(),
-        val configOptions: List<ConfigOption> = emptyList(),
-        val currentModelId: String? = null,
-        val currentModeId: String? = null,
-        val currentConfigValues: Map<String, String> = emptyMap(),
-        /** Liste des slash commands disponibles (parsée depuis system:init de claude). Inclut
-         *  les built-in (/init, /review, …) et les skills personnels (/security-review, …). */
-        val slashCommands: List<String> = emptyList(),
-        /** Liste des MCP servers (name + status connected/needs-auth/error). */
-        val mcpServers: List<McpServerInfo> = emptyList(),
-        /** Tools MCP disponibles (préfixés `mcp__server__action`). */
-        val mcpTools: List<String> = emptyList(),
-        /** Skills isolés (subset de slashCommands marqués comme skills par claude). */
-        val skills: List<String> = emptyList()
-    )
-
-    data class McpServerInfo(val name: String, val status: String)
-
     /** Chemins de mémoire auto chargés par claude (exposé dans system:init.memory_paths). */
     @Volatile
     var lastMemoryPaths: Map<String, String> = emptyMap()
         private set
-
-    data class ConfigOption(
-        val id: String,
-        val name: String,
-        val type: String,
-        val options: List<SelectOption> = emptyList(),
-        val currentValue: String? = null
-    )
-
-    data class ToolCallInfo(
-        val toolCallId: String?,
-        val title: String,
-        val kind: String?,
-        val status: String?,
-        val path: String?,
-        val command: String?,
-        val sessionId: String?,
-        /** Pour les Write : le contenu intégral à écrire (permet d'afficher un preview
-         *  inline en mode plan où le fichier n'est pas réellement créé sur disque). */
-        val writeContent: String? = null,
-        /** Pour les Edit / MultiEdit : le diff old→new à afficher en preview. */
-        val editOldString: String? = null,
-        val editNewString: String? = null,
-        /** Permission mode actif (plan, acceptEdits, …) — permet à l'UI de savoir si
-         *  le fichier va vraiment être créé ou juste proposé. */
-        val permissionMode: String? = null,
-        /** Détail principal à afficher après le nom du tool : pattern Grep, url WebFetch,
-         *  description Task, etc. Distinct de path (qui est un chemin fichier exact). */
-        val detail: String? = null,
-        /** ExitPlanMode : markdown du plan que claude propose. Présence non-nulle ⇒ l'UI doit
-         *  afficher une carte d'approbation et envoyer un tool_result avec la décision user. */
-        val planContent: String? = null,
-        /** AskUserQuestion : JSON array brut des questions de claude. Présence non-nulle ⇒ l'UI
-         *  doit afficher une carte de questions et envoyer un tool_result avec les réponses. */
-        val userQuestionsJson: String? = null
-    )
 
     private val pendingVfsChanges = ConcurrentHashMap<String, String>()
     private val toolCallPreCapturedBefore = ConcurrentHashMap<String, String>()
@@ -224,8 +160,6 @@ class ClaudeACPService(private val project: Project) {
                     val history = project.getService(PromptHistoryService::class.java)
                     val pending = project.getService(PendingChangesService::class.java)
                     // CRITIQUE : ne track que si CETTE instance d'IntelliJ a un prompt en cours.
-                    // Sinon une autre instance ouverte sur le même projet enregistrerait nos
-                    // modifs disque comme ses propres pending changes (pollution cross-instance).
                     if (currentExecutingSessionId == null) return
                     if (!history.hasActivePrompt()) return
 
@@ -237,10 +171,13 @@ class ClaudeACPService(private val project: Project) {
                                     val path = event.file.path
                                     if (!shouldTrackFile(path)) return@forEach
                                     if (pending.consumeRejectFlag(path)) return@forEach
+                                    // ISOLATION : on ne tracke un VFS change comme pending QUE si on
+                                    // a précapturé un BEFORE via un tool_use de notre agent. Sinon =
+                                    // écriture externe (autre process: claude terminal, opencode
+                                    // séparé, save manuel, autre IDE) → on ignore. Évite que les
+                                    // modifs externes contaminent le pending d'un chat actif.
+                                    if (!toolCallPreCapturedBefore.containsKey(path)) return@forEach
                                     if (!pendingVfsChanges.containsKey(path)) {
-                                        // Préférer le BEFORE pre-capturé via tool_call : OpenCode
-                                        // écrit si vite que le VFS peut déjà avoir rafraîchi son
-                                        // cache au nouveau contenu au moment de ce callback.
                                         val before = toolCallPreCapturedBefore.remove(path)
                                             ?: String(event.file.contentsToByteArray())
                                         pendingVfsChanges[path] = before
@@ -251,6 +188,9 @@ class ClaudeACPService(private val project: Project) {
                                     val path = "${event.parent.path}/${event.childName}"
                                     if (!shouldTrackFile(path)) return@forEach
                                     if (pending.consumeRejectFlag(path)) return@forEach
+                                    // Idem VFileContentChangeEvent : on n'accepte la création QUE si
+                                    // un tool_use Write/Edit de notre agent a annoncé ce path.
+                                    if (!toolCallPreCapturedBefore.containsKey(path)) return@forEach
                                     if (!pendingVfsChanges.containsKey(path)) {
                                         val initial = toolCallPreCapturedBefore.remove(path) ?: ""
                                         pendingVfsChanges[path] = initial
@@ -779,6 +719,31 @@ class ClaudeACPService(private val project: Project) {
             item.asJsonObject.get("path")?.asString?.let { paths.add(it) }
         }
 
+        // Détail secondaire pour OpenCode/ACP (même logique que CLI handleCliToolUse) :
+        // pattern Grep, url WebFetch, description Task, todos count, etc. Sans ça l'UI
+        // affiche juste "Task" ou "TodoWrite" sans rien.
+        val detail = when (title) {
+            "Grep", "Glob" -> rawInput?.get("pattern")?.asString
+            "WebFetch" -> rawInput?.get("url")?.asString
+            "WebSearch" -> rawInput?.get("query")?.asString
+            "Task" -> rawInput?.get("description")?.asString
+                ?: rawInput?.get("subagent_type")?.asString
+                ?: rawInput?.get("prompt")?.asString?.take(80)
+            "TodoWrite" -> {
+                val todos = rawInput?.getAsJsonArray("todos")
+                if (todos != null) "${todos.size()} item(s)" else null
+            }
+            "Skill" -> rawInput?.get("skill")?.asString
+            "ToolSearch" -> rawInput?.get("query")?.asString
+            "AskUserQuestion" -> "(question)"
+            "ExitPlanMode" -> "(plan)"
+            else -> {
+                if (title.startsWith("mcp__")) {
+                    rawInput?.entrySet()
+                        ?.joinToString(", ", limit = 3, truncated = "…") { "${it.key}=${it.value}" }
+                } else null
+            }
+        }
         val info = ToolCallInfo(
             toolCallId = toolCallId,
             title = title,
@@ -786,12 +751,13 @@ class ClaudeACPService(private val project: Project) {
             status = status,
             path = pathFromInput ?: paths.firstOrNull(),
             command = command,
-            sessionId = sid
+            sessionId = sid,
+            detail = detail
         )
 
         val genericTitles = setOf("tool", "edit", "write", "read", "bash", "find", "grep")
         val isGenericOnly = title.lowercase() in genericTitles &&
-            info.path == null && info.command == null && status != "completed"
+            info.path == null && info.command == null && info.detail == null && status != "completed"
         if (!isGenericOnly) {
             toolCallListeners.toList().forEach { it(info) }
         }
@@ -1316,7 +1282,9 @@ class ClaudeACPService(private val project: Project) {
         @Volatile var effortOverride: String? = null,
         /** UUID pré-généré côté plugin passé via `--session-id`. Identique à sessionId une fois
          *  system:init reçu, mais connu dès le spawn — sert au `claude --resume <uuid>` depuis le terminal. */
-        @Volatile var preAssignedSessionId: String? = null
+        @Volatile var preAssignedSessionId: String? = null,
+        /** Nb de tentatives auto-reconnect après crash. Limite à 3. */
+        @Volatile var reconnectAttempts: Int = 0
     )
 
     /** Liste curated des models Claude (le CLI n'expose pas la liste dispo via stream-json). */
@@ -1414,12 +1382,24 @@ class ClaudeACPService(private val project: Project) {
             return false
         }
         pendingCliProcs.add(proc)
-        // En CLI : le process est vivant dès maintenant, on peut écrire sur stdin.
-        // Pas besoin d'attendre system:init (qui n'arrive qu'après le 1er prompt envoyé
-        // dans certaines versions de claude). On set READY direct pour activer l'input.
         proc.state = State.READY
+        // CRITIQUE : on assigne immédiatement sessionId au preAssignedSid pour que le 1er
+        // chat (firstSidClaim) le récupère. Sans ça mySessionId reste null jusqu'au 1er
+        // system:init et le routing des permissions/cards se casse.
+        proc.preAssignedSessionId?.let { sid ->
+            sessionId = sid
+            // FIX : aligner proc.sessionId DÈS LE SPAWN pour que les permissions arrivant
+            // avant le system:init aient un sid non-null à propager au panel.
+            proc.sessionId = sid
+            cliProcesses[sid] = proc
+            pendingCliProcs.remove(proc)
+            PluginLogService.getInstance(project).info("permission",
+                "🟢 startCliAgent: proc.sessionId pré-assigné à $sid (avant system:init)")
+            // Notifie sessionCreatedListeners pour que firstSidClaim du panel récupère sid
+            sessionCreatedListeners.toList().forEach { it(sid) }
+        }
         setState(State.READY)
-        log.info("Claude CLI spawned, state=READY (sessionId pending until first user message)")
+        log.info("Claude CLI spawned, state=READY (preAssignedSid=${proc.preAssignedSessionId})")
         return true
     }
 
@@ -1449,8 +1429,19 @@ class ClaudeACPService(private val project: Project) {
             // sauf si le process a été lancé avec --dangerously-skip-permissions. On ajoute donc
             // ce flag automatiquement. Le mode --permission-mode est laissé tel quel pour cohérence
             // avec la dropdown UI (même si le flag --dangerously-skip prend le pas).
+            // Mode TRUST vs SAFE : choisi par l'user via Settings → "Trust this session".
+            //   trust  = --dangerously-skip-permissions (default, jamais de blocage)
+            //   safe   = --permission-mode acceptEdits --permission-prompt-tool stdio
+            //            (cards Allow/Deny pour Bash/MCP, claude attend nos réponses)
+            val trustMode = AgentSettings.getInstance().trustSession
+            val safeArgs = listOf(
+                "--permission-mode", "acceptEdits",
+                "--permission-prompt-tool", "stdio"
+            )
             val baseArgs = if (permissionModeOverride != null) {
+                // Override explicite via setMode UI : prend le dessus sur trust.
                 val mutable = resolvedArgs.toMutableList()
+                mutable.removeAll { it == "--dangerously-skip-permissions" }
                 val idx = mutable.indexOf("--permission-mode")
                 if (idx >= 0 && idx + 1 < mutable.size) {
                     mutable[idx + 1] = permissionModeOverride
@@ -1462,7 +1453,16 @@ class ClaudeACPService(private val project: Project) {
                     mutable += "--dangerously-skip-permissions"
                 }
                 mutable.toList()
-            } else resolvedArgs
+            } else if (trustMode) {
+                // Le default args contient déjà --dangerously-skip-permissions, on garde tel quel
+                resolvedArgs
+            } else {
+                // Mode safe : on retire le dangerously et on ajoute le set safe.
+                val mutable = resolvedArgs.toMutableList()
+                mutable.removeAll { it == "--dangerously-skip-permissions" }
+                mutable.addAll(safeArgs)
+                mutable.toList()
+            }
 
             // Pré-assigne un UUID via --session-id pour que claude utilise NOTRE sid au lieu
             // d'en générer un aléatoirement. Bénéfices :
@@ -1539,18 +1539,51 @@ class ClaudeACPService(private val project: Project) {
 
                 override fun processTerminated(event: ProcessEvent) {
                     log.info("Claude CLI process terminated (exit ${event.exitCode}) sid=${proc.sessionId}")
+                    val crashedSid = proc.sessionId
+                    val wasExecuting = proc.executingSessionId != null
+                    val crashedDuringTurn = wasExecuting && event.exitCode != 0
                     proc.sessionId?.let { cliProcesses.remove(it) }
                     pendingCliProcs.remove(proc)
                     if (proc.state != State.STOPPED) {
                         proc.state = State.STOPPED
                     }
-                    // Mettre à jour le state global : ERROR si plus aucun process actif
+                    if (proc.executingSessionId == currentExecutingSessionId) {
+                        setExecuting(false)
+                    }
+                    // Auto-reconnect : si claude crashe en plein turn ET qu'on a un sid claim,
+                    // on respawn avec --resume. Backoff exponentiel + cap 3 essais pour éviter
+                    // une boucle infinie si claude crash à chaque boot.
+                    if (crashedDuringTurn && crashedSid != null && proc.reconnectAttempts < 3) {
+                        val attempt = proc.reconnectAttempts + 1
+                        val delayMs = listOf(1000L, 5000L, 30000L)[proc.reconnectAttempts]
+                        proc.reconnectAttempts = attempt
+                        log.warn("Claude CLI crashed during turn — auto-reconnecting in ${delayMs}ms (attempt $attempt/3)")
+                        notifyInfo("Claude crashed — auto-reconnecting (attempt $attempt/3)…")
+                        scope.launch {
+                            delay(delayMs)
+                            ApplicationManager.getApplication().invokeLater {
+                                val newProc = spawnClaudeCli(
+                                    resumeSid = crashedSid,
+                                    modelOverride = proc.modelOverride,
+                                    permissionModeOverride = proc.permissionModeOverride,
+                                    effortOverride = proc.effortOverride
+                                )
+                                if (newProc != null) {
+                                    pendingCliProcs.add(newProc)
+                                    newProc.state = State.READY
+                                    setState(State.READY)
+                                    notifyInfo("Claude reconnected (--resume $crashedSid)")
+                                } else if (cliProcesses.isEmpty() && pendingCliProcs.isEmpty()) {
+                                    setState(State.ERROR)
+                                }
+                            }
+                        }
+                        return
+                    }
+                    // Pas de reconnect : update state global selon ce qui reste.
                     if (cliProcesses.isEmpty() && pendingCliProcs.isEmpty() && state != State.STOPPED) {
                         if (event.exitCode != 0) setState(State.ERROR)
                         else setState(State.STOPPED)
-                    }
-                    if (proc.executingSessionId == currentExecutingSessionId) {
-                        setExecuting(false)
                     }
                 }
             })
@@ -1622,33 +1655,192 @@ class ClaudeACPService(private val project: Project) {
      * Si aucun listener n'est attaché : auto-allow (compat avec ancien comportement).
      */
     private fun handleCliSdkControlRequest(proc: CliProc, json: JsonObject) {
-        val request = json.getAsJsonObject("request") ?: return
+        val logSvc0 = PluginLogService.getInstance(project)
+        logSvc0.debug("permission",
+            "🔵 RAW sdk_control_request received | proc.sessionId=${proc.sessionId} | proc.preAssignedSid=${proc.preAssignedSessionId} | raw=${json.toString().take(400)}")
+        val request = json.getAsJsonObject("request") ?: run {
+            logSvc0.warn("permission", "🔴 sdk_control_request has no 'request' field, ignoring")
+            return
+        }
         val subtype = request.get("subtype")?.asString
         if (subtype != "permission") {
-            // Subtype inconnu — répondre success pour ne pas bloquer claude.
+            logSvc0.debug("permission", "🟡 sdk_control_request subtype=$subtype (not permission) → auto-allow")
             val requestId = request.get("request_id")?.asString ?: return
             respondPermission(proc, requestId, allow = true, reason = null)
             return
         }
-        val requestId = request.get("request_id")?.asString ?: return
+        val requestId = request.get("request_id")?.asString ?: run {
+            logSvc0.warn("permission", "🔴 permission request has no request_id, ignoring")
+            return
+        }
         val toolName = request.get("tool_name")?.asString ?: "tool"
         val toolInput = request.get("tool_input")
         val sid = proc.sessionId
+        logSvc0.info("permission",
+            "🔵 PARSED permission request | tool=$toolName | req=$requestId | sid(from proc.sessionId)=$sid | preAssignedSid=${proc.preAssignedSessionId}")
+        if (sid == null) {
+            logSvc0.error("permission",
+                "🔴🔴🔴 BUG: proc.sessionId is NULL — system:init hasn't fired yet OR claude didn't emit it. Using preAssignedSid=${proc.preAssignedSessionId} as fallback for routing.")
+        }
 
-        val info = PermissionRequest(
+        val responded = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun allowOnce(reason: String? = null) {
+            if (responded.compareAndSet(false, true)) {
+                respondPermission(proc, requestId, allow = true, reason = null)
+                if (reason != null) {
+                    PluginLogService.getInstance(project).info("permission", "auto-allowed: $reason")
+                }
+            }
+        }
+        fun denyOnce(reason: String?) {
+            if (responded.compareAndSet(false, true))
+                respondPermission(proc, requestId, allow = false, reason = reason)
+        }
+
+        // AUTO-ALLOW les tools sûrs (lecture seule, no side effect) — sans déranger l'user
+        // avec une card. Sinon `--permission-prompt-tool stdio` rendrait insupportable même
+        // un simple `ls`. La whitelist couvre : lecture fichiers, recherche, git read-only,
+        // navigation (cd/pwd/ls). Tout ce qui modifie l'état (rm, mv, install, network…)
+        // demande toujours confirmation.
+        if (isAutoAllowedTool(toolName, toolInput)) {
+            log.info("Auto-allow safe tool: $toolName")
+            allowOnce("safe-tool: $toolName")
+            return
+        }
+
+        // QUICK FIX : fallback sur preAssignedSid si proc.sessionId est null (système:init
+        // pas encore arrivé). Sinon le routing strict du panel rejette la card.
+        val effectiveSid = sid ?: proc.preAssignedSessionId
+        logSvc0.info("permission",
+            "🔧 effectiveSid for routing = $effectiveSid (sid=$sid, fallback preAssignedSid=${proc.preAssignedSessionId})")
+
+        // Build le PermissionRequest avec respondAllow/Deny qui le retirent de la queue.
+        lateinit var info: PermissionRequest
+        info = PermissionRequest(
             requestId = requestId,
             toolName = toolName,
             toolInput = toolInput?.toString(),
-            sessionId = sid,
-            respondAllow = { respondPermission(proc, requestId, allow = true, reason = null) },
-            respondDeny = { reason -> respondPermission(proc, requestId, allow = false, reason = reason) }
+            sessionId = effectiveSid,
+            respondAllow = {
+                logSvc0.info("permission", "✅ USER clicked ALLOW for req=$requestId tool=$toolName")
+                allowOnce()
+                removePendingPermission(info)
+            },
+            respondDeny = { reason ->
+                logSvc0.info("permission", "❌ USER clicked DENY for req=$requestId tool=$toolName reason=$reason")
+                denyOnce(reason)
+                removePendingPermission(info)
+            }
         )
-        if (permissionRequestListeners.isEmpty()) {
-            log.info("No permission listener — auto-allow $toolName")
-            info.respondAllow()
+        // Push dans la queue centrale → tous les panels seront notifiés et le 1er qui
+        // affiche la card permet à l'user de répondre. Pas de routage fragile.
+        val logSvc = PluginLogService.getInstance(project)
+        logSvc.info("permission",
+            "📥 ADDING to queue: $toolName | req=$requestId | sid=$effectiveSid | listeners=${pendingPermissionsListeners.size}")
+        addPendingPermission(info)
+        logSvc.debug("permission",
+            "📊 Queue state after add: size=${pendingPermissions.size}, all sids=${pendingPermissions.map { it.sessionId }}")
+        // Sécurité : si aucun listener (= tool window jamais ouverte), auto-allow pour ne
+        // pas bloquer claude. Sinon claude attend pour rien.
+        if (pendingPermissionsListeners.isEmpty()) {
+            logSvc.error("permission",
+                "🔴 NO UI LISTENER registered — auto-allowing $toolName (tool window jamais ouverte?)")
+            allowOnce("no-ui")
+            removePendingPermission(info)
             return
         }
-        permissionRequestListeners.toList().forEach { it(info) }
+        // Timeout safety net : si l'user ne clique rien sous 120s, on auto-deny pour
+        // débloquer claude. Sinon le tool reste "Running" indéfiniment (bug observé sur
+        // les Bash quand la card ne s'affiche pas pour cause de routing).
+        scope.launch {
+            delay(120_000)
+            if (!responded.get()) {
+                log.warn("Permission request $requestId for $toolName timed out → auto-deny")
+                PluginLogService.getInstance(project).warn("permission",
+                    "Timeout on $toolName (req=$requestId) → auto-deny after 120s")
+                notifyError("Permission for '$toolName' timed out (no response in 120s) — denied")
+                denyOnce("No response from user within 120s")
+            }
+        }
+    }
+
+    /**
+     * Retourne true si le tool/commande peut être auto-approuvé sans déranger l'user.
+     * Critère : opération en lecture seule sans side effect réseau / disque destructif.
+     *
+     * - Read tools natifs (Read, Grep, Glob, WebFetch lecture seule…) : auto-allow
+     * - Bash : auto-allow uniquement si la commande est dans la whitelist de patterns safe
+     * - Reste (Bash dangereux, Edit, Write, MultiEdit, MCP) : ask user
+     */
+    private fun isAutoAllowedTool(toolName: String, toolInput: com.google.gson.JsonElement?): Boolean {
+        // Tools intrinsèquement safe (jamais d'écriture disque ni network state-changing)
+        val safeTools = setOf("Read", "Grep", "Glob", "Task", "TodoWrite",
+            "NotebookRead", "WebFetch", "WebSearch", "Skill", "ToolSearch",
+            "ExitPlanMode", "AskUserQuestion", "TaskOutput", "TaskList", "TaskGet")
+        if (toolName in safeTools) return true
+        // Pour Bash, regarde la commande
+        if (toolName == "Bash") {
+            val cmd = toolInput?.takeIf { it.isJsonObject }
+                ?.asJsonObject?.get("command")?.asString
+                ?.trim()
+                ?: return false
+            return isSafeBashCommand(cmd)
+        }
+        return false
+    }
+
+    /**
+     * Heuristique pour détecter les commandes Bash safe (read-only, navigation, git read).
+     * Sur-prudent par défaut : tout ce qui ressemble à de l'écriture / network / install
+     * passe par l'user.
+     */
+    private fun isSafeBashCommand(cmd: String): Boolean {
+        // Une commande, ou une chaîne de commandes pipées safe : on split sur | && ; et on
+        // vérifie chaque sous-commande.
+        // ATTENTION : on évite de matcher si on voit un caractère de redirection vers
+        // l'écriture (> >> tee | sudo) ou suppression.
+        val dangerous = listOf(">", ">>", "|tee", " tee ", "sudo ", "rm ", "mv ", "cp ",
+            "chmod ", "chown ", "kill ", "killall ", "dd ", "mkfs", "shutdown",
+            "reboot", "halt", "curl ", "wget ", "fetch ", "scp ", "ssh ", "rsync ",
+            "git push", "git reset --hard", "git clean", "git rebase", "git merge",
+            "git checkout -B", "git commit", "git tag", "npm install", "pip install",
+            "apt ", "apt-get", "yum ", "brew install", "docker run", "docker build")
+        val lower = " " + cmd.lowercase() + " "
+        if (dangerous.any { lower.contains(it) }) return false
+
+        val parts = cmd.split(Regex("\\s*(\\||&&|;)\\s*"))
+            .filter { it.isNotBlank() }
+            .map { it.trim().substringBefore(' ').lowercase() }
+        if (parts.isEmpty()) return false
+
+        val safeBins = setOf(
+            "ls", "pwd", "cd", "cat", "head", "tail", "wc", "echo", "printf",
+            "grep", "egrep", "fgrep", "ag", "rg", "ripgrep", "find", "fd", "fdfind",
+            "tree", "file", "stat", "du", "df", "which", "whereis", "type", "command",
+            "uname", "whoami", "id", "hostname", "date", "uptime", "ps", "top", "htop",
+            "free", "lscpu", "lsblk", "lsmod", "lsof", "env", "printenv", "set",
+            "sort", "uniq", "cut", "awk", "sed", "tr", "rev", "fold", "diff", "cmp",
+            "basename", "dirname", "realpath", "readlink", "true", "false",
+            "git", "jq", "yq", "xq",
+            "node", "python", "python3", "ruby", "perl",
+            "less", "more"
+        )
+        // Pour git, on whitelist juste les sous-commandes read-only
+        for (bin in parts) {
+            if (bin !in safeBins) return false
+        }
+        // Cas spécial git : si la commande commence par `git`, vérifier le sous-verbe.
+        if (cmd.trim().startsWith("git ")) {
+            val sub = cmd.trim().removePrefix("git ").trim().substringBefore(' ').lowercase()
+            val safeGitVerbs = setOf("status", "log", "diff", "show", "branch", "tag",
+                "remote", "config", "describe", "blame", "ls-files", "ls-tree", "rev-parse",
+                "stash", "fetch", "shortlog", "reflog", "grep")
+            if (sub !in safeGitVerbs) return false
+            // Refuse en plus si on voit -d, -D, --force, --delete dans les args
+            val args = cmd.trim().removePrefix("git ")
+            if (Regex("\\s(--force|--delete|-D)\\b").containsMatchIn(" $args ")) return false
+        }
+        return true
     }
 
     private fun respondPermission(proc: CliProc, requestId: String, allow: Boolean, reason: String?) {
@@ -1669,22 +1861,38 @@ class ClaudeACPService(private val project: Project) {
         }
     }
 
-    /** Émis par le service quand claude demande une permission de tool (Bash, etc.). */
-    data class PermissionRequest(
-        val requestId: String,
-        val toolName: String,
-        val toolInput: String?,
-        val sessionId: String?,
-        val respondAllow: () -> Unit,
-        val respondDeny: (reason: String?) -> Unit
-    )
+    /**
+     * Architecture permission robuste : queue centrale de pending permissions + broadcast.
+     * - Chaque permission entrante est immédiatement ajoutée à `pendingPermissions`
+     * - TOUS les panels reçoivent l'event via `pendingPermissionsListeners`
+     * - Chaque panel décide d'afficher selon sa logique propre (sid match, selected, etc.)
+     * - L'AtomicBoolean interne au PermissionRequest empêche les double-réponses
+     * - Si l'user répond à la card (Allow/Deny), elle est retirée de la queue
+     * - Aucune permission ne peut être perdue silencieusement
+     */
+    private val pendingPermissions = java.util.concurrent.CopyOnWriteArrayList<PermissionRequest>()
+    private val pendingPermissionsListeners = mutableListOf<(List<PermissionRequest>) -> Unit>()
 
-    private val permissionRequestListeners = mutableListOf<(PermissionRequest) -> Unit>()
-    fun addPermissionRequestListener(l: (PermissionRequest) -> Unit) {
-        permissionRequestListeners.add(l)
+    fun getPendingPermissions(): List<PermissionRequest> = pendingPermissions.toList()
+
+    fun addPendingPermissionsListener(l: (List<PermissionRequest>) -> Unit) {
+        pendingPermissionsListeners.add(l)
+        // Synchro initial : notifier l'état actuel si non vide
+        if (pendingPermissions.isNotEmpty()) l(pendingPermissions.toList())
     }
-    fun removePermissionRequestListener(l: (PermissionRequest) -> Unit) {
-        permissionRequestListeners.remove(l)
+    fun removePendingPermissionsListener(l: (List<PermissionRequest>) -> Unit) {
+        pendingPermissionsListeners.remove(l)
+    }
+
+    private fun addPendingPermission(req: PermissionRequest) {
+        pendingPermissions.add(req)
+        val snapshot = pendingPermissions.toList()
+        pendingPermissionsListeners.toList().forEach { it(snapshot) }
+    }
+    private fun removePendingPermission(req: PermissionRequest) {
+        pendingPermissions.remove(req)
+        val snapshot = pendingPermissions.toList()
+        pendingPermissionsListeners.toList().forEach { it(snapshot) }
     }
 
     /**
@@ -1737,6 +1945,9 @@ class ClaudeACPService(private val project: Project) {
         if (subtype != "init") return
         val sid = json.get("session_id")?.asString ?: return
         val previousExecuting = proc.executingSessionId
+        val oldProcSid = proc.sessionId
+        PluginLogService.getInstance(project).info("permission",
+            "🟢 system:init received | claude sid=$sid | proc.sessionId (before)=$oldProcSid | preAssignedSid=${proc.preAssignedSessionId} | match=${sid == proc.preAssignedSessionId}")
         proc.sessionId = sid
         proc.state = State.READY
         cliProcesses[sid] = proc
@@ -1793,6 +2004,8 @@ class ClaudeACPService(private val project: Project) {
         }
         // Skills isolés (slashCommands marqués skill par claude, claude_code 2.1+).
         val skills = json.getAsJsonArray("skills")?.mapNotNull { it.asString }.orEmpty()
+        // Sub-agents : Explore, Plan, general-purpose, statusline-setup, etc.
+        val agents = json.getAsJsonArray("agents")?.mapNotNull { it.asString }.orEmpty()
         // Memory paths : où claude charge sa mémoire auto. Permet à l'UI d'exposer un inspector.
         val memoryPathsObj = json.getAsJsonObject("memory_paths")
         if (memoryPathsObj != null) {
@@ -1810,7 +2023,8 @@ class ClaudeACPService(private val project: Project) {
             slashCommands = slashCommands,
             mcpServers = mcpServers,
             mcpTools = mcpTools,
-            skills = skills
+            skills = skills,
+            agents = agents
         )
         sessionConfigs[sid] = config
         sessionConfigListeners.toList().forEach { it(sid, config) }
@@ -1902,6 +2116,7 @@ class ClaudeACPService(private val project: Project) {
                 runCatching { it.asDouble }.getOrNull()
             } ?: 0.0
             val current = sessionUsage[sid] ?: UsageStats()
+            val previousCost = current.totalCostUsd
             val newStats = current.copy(
                 inputTokens = current.inputTokens + (usage?.get("input_tokens")?.asLong ?: 0L),
                 outputTokens = current.outputTokens + (usage?.get("output_tokens")?.asLong ?: 0L),
@@ -1913,6 +2128,11 @@ class ClaudeACPService(private val project: Project) {
             )
             sessionUsage[sid] = newStats
             usageListeners.toList().forEach { it(sid, newStats) }
+            // Add this turn's incremental cost to the rolling weekly counter for budget tracking.
+            val deltaCost = (newStats.totalCostUsd - previousCost).coerceAtLeast(0.0)
+            if (deltaCost > 0.0) {
+                AgentSettings.getInstance().addToCurrentWeek(deltaCost)
+            }
         }
         val isError = json.get("is_error")?.asBoolean ?: false
         if (isError) {
@@ -2252,19 +2472,24 @@ class ClaudeACPService(private val project: Project) {
 
     /** Spawn un nouveau process claude pour un nouveau chat (multi-process). */
     private fun newCliSession(onCreated: ((String) -> Unit)?) {
-        if (onCreated != null) {
-            sessionCreatedListeners.add(object : (String) -> Unit {
-                override fun invoke(sid: String) {
-                    onCreated(sid)
-                    sessionCreatedListeners.remove(this)
-                }
-            })
-        }
         val proc = spawnClaudeCli(resumeSid = null)
         if (proc != null) {
             pendingCliProcs.add(proc)
             proc.state = State.READY
             setState(State.READY)
+            // CRITIQUE : on attribue immédiatement le preAssignedSid au panel, AVANT que
+            // claude n'envoie son system:init. Garantit que mySessionId du panel est set
+            // dès la création du chat → routing strict des permissions/messages par sid.
+            val sid = proc.preAssignedSessionId
+            if (sid != null) {
+                // FIX : aligner proc.sessionId DÈS LE SPAWN (cf startCliAgent).
+                proc.sessionId = sid
+                cliProcesses[sid] = proc
+                pendingCliProcs.remove(proc)
+                PluginLogService.getInstance(project).info("permission",
+                    "🟢 newCliSession: proc.sessionId pré-assigné à $sid (avant system:init)")
+                onCreated?.invoke(sid)
+            }
         } else {
             setState(State.ERROR)
         }

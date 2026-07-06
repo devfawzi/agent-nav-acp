@@ -44,14 +44,15 @@ data class AgentProfile(
             // sur un bucket "Agent SDK credit" séparé du plan subscription interactif
             // (~$200/mois sur Max 20x, puis pay-as-you-go API). Rester sans -p garde le plugin
             // sur le tarif subscription standard, comme l'usage terminal/IDE classique.
+            // MODE SAFE par défaut : `--permission-mode acceptEdits` (Edit/Write auto)
+            // + `--permission-prompt-tool stdio` (Bash/MCP demandent confirmation via cards
+            // Allow/Deny dans le chat). L'user peut basculer en mode TRUST via Settings →
+            // "Trust this session" (cocher) → respawn avec `--dangerously-skip-permissions`.
             args = listOf(
                 "--output-format", "stream-json",
                 "--input-format", "stream-json",
                 "--verbose",
                 "--permission-mode", "acceptEdits",
-                // Route les permission requests via le control channel (sdk_control_request
-                // subtype:permission) au lieu d'un prompt TTY. Permet au plugin d'afficher
-                // un dialog Allow/Deny custom pour les Bash/MCP/etc.
                 "--permission-prompt-tool", "stdio"
             ),
             transport = Transport.CLI_STREAM_JSON,

@@ -34,7 +34,10 @@ class PluginLogDialog(private val project: Project) {
     }
 
     private val levelFilter = JComboBox(arrayOf("ALL", "DEBUG", "INFO", "WARN", "ERROR")).apply {
-        selectedItem = "INFO"
+        // Default DEBUG : on a beaucoup de logs détaillés sur les interactions claude
+        // (permission flow, control_request, VFS tracking). Mieux vaut tout voir d'emblée
+        // pour diagnostiquer les bugs ; l'user filtre s'il veut moins.
+        selectedItem = "DEBUG"
     }
     private val categoryFilter = JTextField(20).apply { toolTipText = "Filter by category substring" }
     private val autoScrollCheck = JCheckBox("Auto-scroll", true).apply { isOpaque = false }
