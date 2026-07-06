@@ -96,17 +96,36 @@ class AgentNavToolWindowFactory : ToolWindowFactory, DumbAware {
             val sessionsService = project.getService(ClaudeSessionsService::class.java)
             // Le dialog charge lui-même (current project + toggle "all projects") et filtre.
             ResumeSessionDialog(project, sessionsService) { picked ->
-                val title = picked.firstUserMessage.take(40).let {
-                    if (picked.firstUserMessage.length > 40) "$it…" else it
+                val raw = picked.summary ?: picked.firstUserMessage
+                val title = raw.take(40).let { if (raw.length > 40) "$it…" else it }
+
+                // Exigence sessions : le resume charge DANS LE TAB COURANT. Si une
+                // conversation y est déjà en cours, on demande (No = nouveau tab).
+                val selected = toolWindow.contentManager.selectedContent
+                val activePanel = selected?.getUserData(PANEL_KEY)
+                val resumeHere = activePanel != null &&
+                    (!activePanel.hasConversation() ||
+                        JOptionPane.showConfirmDialog(
+                            null,
+                            "Load this session in the current tab? This replaces the ongoing chat.\n" +
+                                "Choose No to open it in a new tab.",
+                            "Resume session",
+                            JOptionPane.YES_NO_OPTION
+                        ) == JOptionPane.YES_OPTION)
+
+                if (resumeHere && activePanel != null && selected != null) {
+                    activePanel.resumeSessionHere(picked)
+                    selected.displayName = title
+                } else {
+                    addNewChatContent(
+                        project, toolWindow,
+                        resumeSid = picked.sessionId,
+                        // Crucial : utilise le cwd d'origine pour que `claude --resume <sid>`
+                        // retrouve la conv (sinon "No conversation found" et proc exit).
+                        resumeCwd = picked.cwd,
+                        initialTitle = title
+                    )
                 }
-                addNewChatContent(
-                    project, toolWindow,
-                    resumeSid = picked.sessionId,
-                    // Crucial : utilise le cwd d'origine pour que `claude --resume <sid>` retrouve
-                    // la conv (sinon "No conversation found with session ID" et proc exit).
-                    resumeCwd = picked.cwd,
-                    initialTitle = title
-                )
             }.show()
         }
         override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT

@@ -58,6 +58,51 @@ class AgentNavToolWindowPanel(
         chatSession.sessionId?.let { updateSessionLabel(it) }
     }
 
+    /** True si une conversation a déjà démarré dans ce tab (prompt envoyé, rename ou resume). */
+    fun hasConversation(): Boolean = hasAutoRenamed
+
+    /**
+     * Charge une session existante DANS CE TAB (exigence sessions du spec §3) : kill du
+     * backend courant, respawn `--resume <sid>` avec le cwd d'origine de la session, et
+     * REPLAY de l'historique lisible (user/assistant, wrappers filtrés) dans le chat.
+     */
+    fun resumeSessionHere(picked: ClaudeSessionsService.SessionInfo) {
+        PluginLogService.getInstance(project).info("panel",
+            "⏪ Resume in-tab: sid=${picked.sessionId} cwd=${picked.cwd}")
+        chatSession.close()
+        chatSession = ChatSession(
+            project = project,
+            profile = AgentProfile.CLAUDE_CODE,
+            resumeSid = picked.sessionId,
+            cwdOverride = picked.cwd
+        )
+        wireBackend()
+        hasAutoRenamed = true
+        inputPanel.lockAgent()
+        statusLabel.text = "⏪ Resuming…"
+        statusLabel.foreground = JBColor.foreground()
+
+        chatPanel.clear()
+        val file = SessionHistoryLoader.sessionFile(picked.cwd, picked.sessionId)
+        if (file != null) {
+            val items = SessionHistoryLoader.load(file)
+            chatPanel.appendInfo(
+                "⏪ Resumed session ${picked.sessionId.take(8)}… — ${items.size} previous message(s)")
+            items.forEach { item ->
+                when (item) {
+                    is SessionHistoryLoader.Item.User -> chatPanel.appendUserMessage(item.text)
+                    is SessionHistoryLoader.Item.Assistant -> chatPanel.appendAssistantChunk(item.text)
+                }
+            }
+        } else {
+            chatPanel.appendInfo(
+                "⏪ Resumed session ${picked.sessionId.take(8)}… (history file not found)")
+        }
+
+        chatSession.start()
+        chatSession.sessionId?.let { updateSessionLabel(it) }
+    }
+
     private val chatPanel = ChatPanel(project) { toolUseId, replyText, switchModeTo ->
         // ExitPlanMode Approve / AskUserQuestion Submit / Skip / Reject : on envoie le
         // tool_result attendu par claude, et si demandé on switch le permission mode
