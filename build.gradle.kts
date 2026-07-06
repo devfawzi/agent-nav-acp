@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "com.agentnav"
-version = "0.9.0"
+version = "0.9.1"
 
 repositories {
     mavenCentral()
@@ -61,11 +61,23 @@ tasks.named<org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask>("runIde") {
 }
 
 intellijPlatform {
+    // Lance un IDE headless depuis la distribution — en conflit avec l'IDE local en cours
+    // d'exécution (localIdePath) et inutile pour nos settings. Désactivé (pattern courant).
+    buildSearchableOptions = false
+
     pluginConfiguration {
         ideaVersion {
             sinceBuild = "261"
         }
         changeNotes = """
+            <h3>0.9.1</h3>
+            <ul>
+                <li>Stream-json protocol now validated against real claude 2.1.201 captures
+                    (16 fixtures, 43 tests) — replayable capture harness for future CLI upgrades.</li>
+                <li>Discovered & wired <code>rename_session</code> control request (persisted
+                    in the session .jsonl, visible in CLI <code>/resume</code>).</li>
+                <li>Fixed silent exception on local-command outputs (e.g. after set_model).</li>
+            </ul>
             <h3>0.9.0</h3>
             <ul>
                 <li><b>AgentNav rework</b> — new plugin id <code>com.agentnav</code>, restructured

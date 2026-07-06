@@ -657,7 +657,20 @@ class ClaudeCliBackend(
     private fun handleUserEvent(json: JsonObject) {
         // Contient les tool_results — on les utilise pour marquer les tool_use comme completed
         val message = json.getAsJsonObject("message") ?: return
-        val content = message.getAsJsonArray("content") ?: return
+        val rawContent = message.get("content") ?: return
+        // content STRING = sortie de commande locale (ex. "<local-command-stdout>Set model
+        // to …</local-command-stdout>" après un set_model) — découvert par fixture 2.1.201,
+        // getAsJsonArray levait une ClassCastException et la ligne était perdue.
+        if (rawContent.isJsonPrimitive) {
+            val text = rawContent.asString
+                .removePrefix("<local-command-stdout>")
+                .removeSuffix("</local-command-stdout>")
+                .trim()
+            if (text.isNotEmpty()) onInfo?.invoke(text)
+            return
+        }
+        if (!rawContent.isJsonArray) return
+        val content = rawContent.asJsonArray
         content.forEach { item ->
             if (!item.isJsonObject) return@forEach
             val block = item.asJsonObject
