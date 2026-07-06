@@ -30,6 +30,12 @@ class AgentSettings : PersistentStateComponent<AgentSettings.State> {
         /** Path to a JSON file passed to `claude --mcp-config <path>`. Empty = use claude's global config. */
         var mcpConfigPath: String = "",
         /**
+         * Dossiers additionnels passés à claude via `--add-dir <path>` (IMPROVEMENTS #8) :
+         * étend le sandbox filesystem au-delà du cwd — utile pour @/abs/path hors projet.
+         * Format : paths absolus séparés par des virgules. ⚠ claude peut alors écrire dedans.
+         */
+        var additionalDirsCsv: String = "",
+        /**
          * Cache des derniers tools MCP observés par server, persisté entre runs.
          * Permet à la Settings page d'afficher les tools sans avoir à relancer un claude.
          * Mis à jour à chaque `system:init` du transport CLI.
@@ -105,6 +111,16 @@ class AgentSettings : PersistentStateComponent<AgentSettings.State> {
         set(value) {
             state.mcpConfigPath = value
         }
+
+    var additionalDirsCsv: String
+        get() = state.additionalDirsCsv
+        set(value) { state.additionalDirsCsv = value }
+
+    /** Dossiers --add-dir valides (existants), parsés depuis le CSV. */
+    fun getAdditionalDirs(): List<String> =
+        state.additionalDirsCsv.split(",")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && java.io.File(it).isDirectory }
 
     var injectDiagnostics: Boolean
         get() = state.injectDiagnostics

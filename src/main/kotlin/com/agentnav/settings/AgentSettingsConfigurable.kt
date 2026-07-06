@@ -30,7 +30,7 @@ import javax.swing.*
  *  - Section "Agents" : liste des profils (builtin + custom) avec Add / Edit / Delete custom
  *  - Section "Binaries" : paths overrides pour claude / npx
  */
-class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
+class AgentSettingsConfigurable : BoundConfigurable("AgentNav") {
 
     private val binarySettings = AgentSettings.getInstance()
     private val profilesService = AgentProfilesService.getInstance()
@@ -44,6 +44,7 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
     private val trustSessionCheck = JCheckBox(
         "Trust this session — auto-approve all tools (no Allow/Deny prompts)")
     private val weeklyBudgetField = JTextField(8)
+    private val additionalDirsField = JTextField(30)
     private val weeklyBudgetStatusLabel = JBLabel("")
     private val claudeDetectedLabel = JBLabel("")
     private val npxDetectedLabel = JBLabel("")
@@ -136,6 +137,15 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
             row("MCP config file:") { cell(mcpConfigField).align(AlignX.FILL) }
             row("") { cell(mcpConfigStatusLabel) }
             row {
+                text(
+                    "Additional directories passed to <code>claude --add-dir</code> " +
+                        "(comma-separated absolute paths). Extends claude's filesystem sandbox " +
+                        "beyond the project — enables <code>@/abs/path</code> mentions. " +
+                        "⚠ Claude can then also write there."
+                )
+            }
+            row("Additional directories:") { cell(additionalDirsField).align(AlignX.FILL) }
+            row {
                 cell(JBScrollPane(mcpInventoryPanel).apply {
                     preferredSize = Dimension(0, 240)
                     border = JBUI.Borders.customLine(com.intellij.ui.JBColor.border(), 1)
@@ -210,6 +220,7 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
         npxField.text = binarySettings.npxPath
         opencodeField.text = binarySettings.opencodePath
         mcpConfigField.text = binarySettings.mcpConfigPath
+        additionalDirsField.text = binarySettings.additionalDirsCsv
         injectDiagnosticsCheck.isSelected = binarySettings.injectDiagnostics
         includeWarningsCheck.isSelected = binarySettings.injectDiagnosticsIncludeWarnings
         trustSessionCheck.isSelected = binarySettings.trustSession
@@ -346,6 +357,7 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
             npxField.text != binarySettings.npxPath ||
             opencodeField.text != binarySettings.opencodePath ||
             mcpConfigField.text != binarySettings.mcpConfigPath ||
+            additionalDirsField.text != binarySettings.additionalDirsCsv ||
             injectDiagnosticsCheck.isSelected != binarySettings.injectDiagnostics ||
             includeWarningsCheck.isSelected != binarySettings.injectDiagnosticsIncludeWarnings ||
             trustSessionCheck.isSelected != binarySettings.trustSession ||
@@ -357,6 +369,7 @@ class AgentSettingsConfigurable : BoundConfigurable("AgentNav ACP") {
         binarySettings.npxPath = npxField.text.trim()
         binarySettings.opencodePath = opencodeField.text.trim()
         binarySettings.mcpConfigPath = mcpConfigField.text.trim()
+        binarySettings.additionalDirsCsv = additionalDirsField.text.trim()
         binarySettings.injectDiagnostics = injectDiagnosticsCheck.isSelected
         binarySettings.injectDiagnosticsIncludeWarnings = includeWarningsCheck.isSelected
         binarySettings.trustSession = trustSessionCheck.isSelected

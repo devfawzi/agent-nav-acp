@@ -237,6 +237,10 @@ class ClaudeCliBackend(
                 if (mcpConfigPath != null) {
                     add("--mcp-config"); add(mcpConfigPath)
                 }
+                // IMPROVEMENTS #8 : étend le sandbox filesystem (@/abs/path hors projet).
+                AgentSettings.getInstance().getAdditionalDirs().forEach { dir ->
+                    add("--add-dir"); add(dir)
+                }
                 if (modelOverride != null) {
                     add("--model"); add(modelOverride!!)
                 }

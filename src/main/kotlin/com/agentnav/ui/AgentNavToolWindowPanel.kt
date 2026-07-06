@@ -514,6 +514,7 @@ class AgentNavToolWindowPanel(
                 com.intellij.openapi.options.ShowSettingsUtil.getInstance()
                     .showSettingsDialog(project, AgentSettingsConfigurable::class.java)
             }
+            "export" -> exportChatToMarkdown()
             else -> {
                 chatPanel.appendInfo("Unknown command: /$cmd")
             }
@@ -940,10 +941,15 @@ class AgentNavToolWindowPanel(
         inputPanel.addAttachmentExternal(att)
     }
 
+    /** Pré-remplit le prompt (quick actions éditeur : Explain/Refactor/Ask). */
+    fun prefillPrompt(text: String) {
+        inputPanel.insertText(text)
+    }
+
     /** True si ce panel correspond à l'onglet actuellement sélectionné dans la tool window. */
     private fun isCurrentlySelectedInToolWindow(): Boolean {
         val tw = com.intellij.openapi.wm.ToolWindowManager.getInstance(project)
-            .getToolWindow("AgentNav ACP") ?: return false
+            .getToolWindow("AgentNav") ?: return false
         val selected = tw.contentManager.selectedContent ?: return false
         val selectedPanel = selected.getUserData(AgentNavToolWindowFactory.PANEL_KEY)
         return selectedPanel === this

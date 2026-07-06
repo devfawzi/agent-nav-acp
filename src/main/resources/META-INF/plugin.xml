@@ -98,5 +98,25 @@
             <keyboard-shortcut keymap="Mac OS X" first-keystroke="meta alt L"/>
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
         </action>
+
+        <!-- Quick actions éditeur (IMPROVEMENTS #7) -->
+        <action id="com.agentnav.AskClaude"
+                class="com.agentnav.services.AskClaudeAction"
+                text="Ask Claude About This"
+                description="Attach the selection to the chat and focus the prompt input.">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+        <action id="com.agentnav.ExplainWithClaude"
+                class="com.agentnav.services.ExplainWithClaudeAction"
+                text="Explain with Claude"
+                description="Attach the selection and prefill an explain prompt.">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+        <action id="com.agentnav.RefactorWithClaude"
+                class="com.agentnav.services.RefactorWithClaudeAction"
+                text="Refactor with Claude"
+                description="Attach the selection and prefill a refactor prompt.">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
     </actions>
 </idea-plugin>
