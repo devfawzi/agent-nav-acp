@@ -98,6 +98,7 @@ class ClaudeCliBackend(
     override var onStateChange: ((AgentState) -> Unit)? = null
     override var onSessionReady: ((String) -> Unit)? = null
     override var onTextChunk: ((String) -> Unit)? = null
+    override var onSyntheticOutput: ((String) -> Unit)? = null
     override var onThoughtChunk: ((String) -> Unit)? = null
     override var onToolCall: ((ToolCallInfo) -> Unit)? = null
     override var onPermission: ((PermissionRequest) -> Unit)? = null
@@ -505,16 +506,19 @@ class ClaudeCliBackend(
             val line = lineBuffer.substring(0, nl).trim()
             lineBuffer.delete(0, nl + 1)
             if (line.isEmpty()) continue
-            if (line.startsWith("{")) {
-                try {
-                    val json = JsonParser.parseString(line).asJsonObject
-                    handleEvent(json)
-                } catch (e: Exception) {
-                    log.warn("CLI parse fail (${e.message}): ${line.take(200)}")
-                }
-            } else {
-                log.info("CLI non-json line: ${line.take(150)}")
-            }
+            // Parser pur validé contre les fixtures (src/test/resources/fixtures/claude/) —
+            // ne lève jamais : ParseError/Unknown sont des événements comme les autres.
+            ClaudeStreamParser.parse(line).forEach { dispatchEvent(it) }
+        }
+    }
+
+    /** Écrit une ligne sur stdin de claude. Retourne false si l'écriture échoue. */
+    private fun writeLine(message: String): Boolean {
+        val w = writer ?: return false
+        return try {
+            w.write(message); w.write("\n"); w.flush(); true
+        } catch (e: Exception) {
+            log.warn("CLI write failed", e); false
         }
     }
 
@@ -526,41 +530,65 @@ class ClaudeCliBackend(
         }
     }
 
-    private fun handleEvent(json: JsonObject) {
-        val type = json.get("type")?.asString
-        val subtype = json.get("subtype")?.asString
-        // Trace TOUS les events claude pour diagnostique des hangs (INFO level pour qu'on voie
-        // tout dans le Logger sans devoir changer le filtre).
-        pluginLog.info("cli-event", "📨 type=$type subtype=$subtype sid=${_sessionId.take(8)}")
-        when (type) {
-            "system" -> handleSystemEvent(json)
-            "assistant" -> handleAssistantEvent(json)
-            "user" -> handleUserEvent(json)
-            "result" -> handleResultEvent(json)
-            "rate_limit_event" -> { /* ignore */ }
-            "control_request" -> handleControlRequest(json)
-            "sdk_control_request" -> handleSdkControlRequest(json)
-            "control_response" -> handleControlResponse(json)
-            "stream_event" -> {}
-            else -> {
-                pluginLog.warn("cli-event", "❓ unknown type=$type raw=${json.toString().take(300)}")
+    /**
+     * Route les événements typés du parser vers les EFFETS (état, callbacks UI, VFS, caches).
+     * Toute l'extraction JSON vit dans ClaudeStreamParser — testée contre les fixtures.
+     */
+    private fun dispatchEvent(e: ClaudeEvent) {
+        pluginLog.info("cli-event", "📨 ${e::class.simpleName} sid=${_sessionId.take(8)}")
+        when (e) {
+            is ClaudeEvent.Init -> handleInit(e)
+            is ClaudeEvent.Status -> {
+                if (e.permissionMode != null) {
+                    updateConfig { it.copy(currentModeId = e.permissionMode) }
+                    permissionModeOverride = e.permissionMode
+                    log.info("CLI system:status — permissionMode now ${e.permissionMode}")
+                }
             }
+            is ClaudeEvent.Hook -> pluginLog.info("hooks", "${e.subtype}: ${e.hookName ?: "?"}")
+            is ClaudeEvent.ThinkingTokens -> { /* jauge de contexte future — pas d'UI encore */ }
+            is ClaudeEvent.SystemOther -> pluginLog.info("cli-event", "system:${e.subtype} (ignoré)")
+            is ClaudeEvent.AssistantText ->
+                if (e.isSynthetic) (onSyntheticOutput ?: onTextChunk)?.invoke(e.text)
+                else onTextChunk?.invoke(e.text)
+            is ClaudeEvent.AssistantThinking -> onThoughtChunk?.invoke(e.text)
+            is ClaudeEvent.ToolUse -> handleToolUse(e)
+            is ClaudeEvent.ToolResult -> {
+                if (e.isError && !e.errorText.isNullOrBlank()) {
+                    log.info("CLI tool error: ${e.errorText}")
+                    onToolResultError?.invoke(e.errorText)
+                }
+                onToolCall?.invoke(ToolCallInfo(
+                    toolCallId = e.toolUseId, title = "tool", kind = null,
+                    status = if (e.isError) "error" else "completed",
+                    path = null, command = null, sessionId = _sessionId
+                ))
+            }
+            is ClaudeEvent.LocalCommandOutput -> onInfo?.invoke(e.text)
+            is ClaudeEvent.TurnResult -> handleTurnResult(e)
+            is ClaudeEvent.ControlResponse -> handleControlResponseEvent(e)
+            is ClaudeEvent.CanUseTool -> {
+                pluginLog.info("control",
+                    "🔀 can_use_tool → permission flow | tool=${e.toolName} req=${e.requestId} legacy=${e.legacy} blocked=${e.blockedPath}")
+                dispatchPermission(e.requestId, e.toolName, e.input, e.blockedPath, e.permissionSuggestionsJson)
+            }
+            is ClaudeEvent.UnknownControlRequest -> {
+                if (e.requestId != null && writeLine(ClaudeRequests.allowOnceDecision(e.requestId))) {
+                    pluginLog.info("control", "✓ allow_once to unknown control_request subtype=${e.subtype}")
+                }
+            }
+            ClaudeEvent.RateLimit, ClaudeEvent.StreamEvent -> {}
+            is ClaudeEvent.Unknown -> {
+                pluginLog.warn("protocol", "❓ unknown event type=${e.type} raw=${e.raw}")
+                onInfo?.invoke("⚠ unhandled event: ${e.type}")
+            }
+            is ClaudeEvent.ParseError ->
+                pluginLog.warn("protocol", "parse-fail: ${e.message} raw=${e.raw}")
         }
     }
 
-    private fun handleSystemEvent(json: JsonObject) {
-        val subtype = json.get("subtype")?.asString
-        if (subtype == "status") {
-            val mode = json.get("permissionMode")?.asString
-            if (mode != null) {
-                updateConfig { it.copy(currentModeId = mode) }
-                permissionModeOverride = mode
-                log.info("CLI system:status — permissionMode now $mode")
-            }
-            return
-        }
-        if (subtype != "init") return
-        val sid = json.get("session_id")?.asString ?: return
+    private fun handleInit(e: ClaudeEvent.Init) {
+        val sid = e.sessionId ?: return
         // Cas normal : claude utilise le preAssignedSid → sid == _sessionId. Si différent
         // (claude a régénéré), on adopte le nouveau pour que les events futurs collent.
         if (sid != _sessionId) {
@@ -570,24 +598,8 @@ class ClaudeCliBackend(
             onSessionReady?.invoke(sid)
         }
 
-        val currentModel = json.get("model")?.asString
-        val currentPermMode = json.get("permissionMode")?.asString
-        val slashCommands = json.getAsJsonArray("slash_commands")
-            ?.mapNotNull { it.asString }.orEmpty()
-        val mcpServers = json.getAsJsonArray("mcp_servers")?.mapNotNull { el ->
-            if (!el.isJsonObject) null
-            else {
-                val o = el.asJsonObject
-                val name = o.get("name")?.asString ?: return@mapNotNull null
-                val status = o.get("status")?.asString ?: "unknown"
-                McpServerInfo(name, status)
-            }
-        }.orEmpty()
-        val mcpTools = json.getAsJsonArray("tools")?.mapNotNull { it.asString }
-            ?.filter { it.startsWith("mcp__") }.orEmpty()
-
         // Update cache MCP au niveau settings (utilisé par Settings → MCP inventory)
-        val toolsByServer = mcpTools
+        val toolsByServer = e.mcpTools
             .mapNotNull { full ->
                 val rest = full.removePrefix("mcp__")
                 val server = rest.substringBefore("__")
@@ -599,124 +611,45 @@ class ClaudeCliBackend(
             AgentSettings.getInstance().updateMcpToolsCache(toolsByServer)
         }
 
-        val skills = json.getAsJsonArray("skills")?.mapNotNull { it.asString }.orEmpty()
-        val agents = json.getAsJsonArray("agents")?.mapNotNull { it.asString }.orEmpty()
-        val memoryPathsObj = json.getAsJsonObject("memory_paths")
-        if (memoryPathsObj != null) {
-            val paths = memoryPathsObj.entrySet().associate { (k, v) -> k to (v.asString ?: "") }
-            onMemoryPaths?.invoke(paths)
-        }
-
         // Persiste slash commands / skills / MCP servers pour peupler le popup `/` et le
         // picker /mcp AVANT le 1er prompt des prochaines sessions (parité TUI claude).
         AgentSettings.getInstance().apply {
-            updateSlashCommandsCache(slashCommands)
-            updateSkillsCache(skills)
-            updateMcpServersCache(mcpServers.associate { it.name to it.status })
+            updateSlashCommandsCache(e.slashCommands)
+            updateSkillsCache(e.skills)
+            updateMcpServersCache(e.mcpServers.associate { it.name to it.status })
         }
+
+        if (e.memoryPaths.isNotEmpty()) onMemoryPaths?.invoke(e.memoryPaths)
 
         val newConfig = SessionConfig(
             models = CLAUDE_MODELS,
             modes = CLAUDE_PERMISSION_MODES,
             configOptions = listOf(CLAUDE_EFFORT_OPTION),
-            currentModelId = currentModel ?: _config.currentModelId,
-            currentModeId = currentPermMode ?: _config.currentModeId,
+            currentModelId = e.model ?: _config.currentModelId,
+            currentModeId = e.permissionMode ?: _config.currentModeId,
             currentConfigValues = _config.currentConfigValues,
-            slashCommands = slashCommands,
-            mcpServers = mcpServers,
-            mcpTools = mcpTools,
-            skills = skills,
-            agents = agents
+            slashCommands = e.slashCommands,
+            mcpServers = e.mcpServers,
+            mcpTools = e.mcpTools,
+            skills = e.skills,
+            agents = e.agents
         )
         _config = newConfig
         onConfigChange?.invoke(newConfig)
-        log.info("Claude CLI session ready: sid=$_sessionId model=$currentModel")
+        log.info("Claude CLI session ready: sid=$_sessionId model=${e.model}")
     }
 
-    private fun handleAssistantEvent(json: JsonObject) {
-        val message = json.getAsJsonObject("message") ?: return
-        val content = message.getAsJsonArray("content") ?: return
-        content.forEach { item ->
-            if (!item.isJsonObject) return@forEach
-            val block = item.asJsonObject
-            when (block.get("type")?.asString) {
-                "text" -> {
-                    val text = block.get("text")?.asString
-                    if (!text.isNullOrEmpty()) onTextChunk?.invoke(text)
-                }
-                "thinking" -> {
-                    val thinking = block.get("thinking")?.asString
-                        ?: block.get("text")?.asString
-                    if (!thinking.isNullOrEmpty()) onThoughtChunk?.invoke(thinking)
-                }
-                "tool_use" -> handleToolUse(block)
-            }
-        }
-    }
+    // (extraction assistant/user/result → ClaudeStreamParser ; ici il ne reste que les effets)
 
-    private fun handleUserEvent(json: JsonObject) {
-        // Contient les tool_results — on les utilise pour marquer les tool_use comme completed
-        val message = json.getAsJsonObject("message") ?: return
-        val rawContent = message.get("content") ?: return
-        // content STRING = sortie de commande locale (ex. "<local-command-stdout>Set model
-        // to …</local-command-stdout>" après un set_model) — découvert par fixture 2.1.201,
-        // getAsJsonArray levait une ClassCastException et la ligne était perdue.
-        if (rawContent.isJsonPrimitive) {
-            val text = rawContent.asString
-                .removePrefix("<local-command-stdout>")
-                .removeSuffix("</local-command-stdout>")
-                .trim()
-            if (text.isNotEmpty()) onInfo?.invoke(text)
-            return
-        }
-        if (!rawContent.isJsonArray) return
-        val content = rawContent.asJsonArray
-        content.forEach { item ->
-            if (!item.isJsonObject) return@forEach
-            val block = item.asJsonObject
-            if (block.get("type")?.asString == "tool_result") {
-                val toolUseId = block.get("tool_use_id")?.asString ?: return@forEach
-                val isError = block.get("is_error")?.asBoolean == true
-                if (isError) {
-                    val errorContent = block.get("content")?.let {
-                        if (it.isJsonPrimitive) it.asString
-                        else if (it.isJsonArray) {
-                            it.asJsonArray.joinToString("\n") { el ->
-                                el.asJsonObject?.get("text")?.asString ?: ""
-                            }
-                        } else null
-                    }
-                    if (!errorContent.isNullOrBlank()) {
-                        log.info("CLI tool error: $errorContent")
-                        onToolResultError?.invoke(errorContent)
-                    }
-                }
-                onToolCall?.invoke(ToolCallInfo(
-                    toolCallId = toolUseId,
-                    title = "tool",
-                    kind = null,
-                    status = if (isError) "error" else "completed",
-                    path = null,
-                    command = null,
-                    sessionId = _sessionId
-                ))
-            }
-        }
-    }
-
-    private fun handleResultEvent(json: JsonObject) {
+    private fun handleTurnResult(e: ClaudeEvent.TurnResult) {
         setExecuting(false)
-        val usage = json.getAsJsonObject("usage")
-        val cost = json.get("total_cost_usd")?.let {
-            runCatching { it.asDouble }.getOrNull()
-        } ?: 0.0
         val previousCost = _usage.totalCostUsd
         val newStats = _usage.copy(
-            inputTokens = _usage.inputTokens + (usage?.get("input_tokens")?.asLong ?: 0L),
-            outputTokens = _usage.outputTokens + (usage?.get("output_tokens")?.asLong ?: 0L),
-            cacheReadTokens = _usage.cacheReadTokens + (usage?.get("cache_read_input_tokens")?.asLong ?: 0L),
-            cacheCreationTokens = _usage.cacheCreationTokens + (usage?.get("cache_creation_input_tokens")?.asLong ?: 0L),
-            totalCostUsd = cost.takeIf { it > _usage.totalCostUsd } ?: _usage.totalCostUsd,
+            inputTokens = _usage.inputTokens + e.inputTokens,
+            outputTokens = _usage.outputTokens + e.outputTokens,
+            cacheReadTokens = _usage.cacheReadTokens + e.cacheReadTokens,
+            cacheCreationTokens = _usage.cacheCreationTokens + e.cacheCreationTokens,
+            totalCostUsd = e.totalCostUsd.takeIf { it > _usage.totalCostUsd } ?: _usage.totalCostUsd,
             turnCount = _usage.turnCount + 1
         )
         _usage = newStats
@@ -727,88 +660,14 @@ class ClaudeCliBackend(
             AgentSettings.getInstance().addToCurrentWeek(deltaCost)
         }
 
-        val isError = json.get("is_error")?.asBoolean ?: false
-        if (isError) {
-            val errorsArr = json.getAsJsonArray("errors")
-            val errMsg = if (errorsArr != null && errorsArr.size() > 0) {
-                errorsArr.mapNotNull { it.asString }.joinToString("; ")
-            } else {
-                json.get("result")?.asString ?: "unknown error"
-            }
+        if (e.isError) {
+            val errMsg = e.errorMessage ?: "unknown error"
             notifyError("Claude error: $errMsg")
             onToolResultError?.invoke(errMsg)
         }
     }
 
-    private fun handleControlRequest(json: JsonObject) {
-        pluginLog.info("control",
-            "📨 control_request RAW: ${json.toString().take(800)}")
-
-        val request = json.getAsJsonObject("request")
-        val subtype = request?.get("subtype")?.asString
-
-        // claude 2.1+ : nouveau format permission via control_request avec subtype="can_use_tool".
-        // Le request_id est AU TOP-LEVEL (pas dans request), et l'input s'appelle "input" pas "tool_input".
-        if (subtype == "can_use_tool") {
-            val requestId = json.get("request_id")?.asString ?: run {
-                pluginLog.warn("control", "can_use_tool sans request_id, ignoring")
-                return
-            }
-            val toolName = request.get("tool_name")?.asString ?: "tool"
-            val toolInput = request.get("input")
-            val blockedPath = request.get("blocked_path")?.asString
-            // permission_suggestions = règles que claude propose pour ne plus redemander
-            // (scope "session" ou "localSettings"). On renvoie ces règles en updatedPermissions
-            // si l'user choisit "Allow always".
-            val permissionSuggestions = request.get("permission_suggestions")?.toString()
-            pluginLog.info("control",
-                "🔀 can_use_tool → permission flow | tool=$toolName req=$requestId blocked=$blockedPath suggestions=${permissionSuggestions != null}")
-            dispatchPermission(requestId, toolName, toolInput, blockedPath, permissionSuggestions)
-            return
-        }
-
-        // claude legacy : control_request subtype="permission" (rare, vieux format).
-        if (subtype == "permission") {
-            handleSdkControlRequest(json)
-            return
-        }
-
-        // Fallback : control_request inconnu → réponse permissive pour ne pas bloquer.
-        val requestId = json.get("request_id")?.asString ?: run {
-            pluginLog.warn("control", "control_request without request_id, ignoring")
-            return
-        }
-        val resp = """{"type":"control_response","request_id":${escapeJson(requestId)},"response":{"decision":"allow_once"}}"""
-        try {
-            writer?.write("$resp\n")
-            writer?.flush()
-            pluginLog.info("control", "✓ Replied allow_once to unknown req=$requestId subtype=$subtype")
-        } catch (e: Exception) {
-            log.warn("CLI control_response write failed", e)
-        }
-    }
-
-    private fun handleSdkControlRequest(json: JsonObject) {
-        pluginLog.info("permission",
-            "🔵 sdk_control_request RAW: ${json.toString().take(800)}")
-        val request = json.getAsJsonObject("request") ?: run {
-            pluginLog.warn("permission", "🔴 sdk_control_request has no 'request' field")
-            return
-        }
-        val subtype = request.get("subtype")?.asString
-        if (subtype != "permission") {
-            val requestId = request.get("request_id")?.asString ?: return
-            respondPermission(requestId, allow = true, reason = null, originalInput = null, permissionSuggestionsJson = null)
-            return
-        }
-        val requestId = request.get("request_id")?.asString ?: run {
-            pluginLog.warn("permission", "🔴 sdk_control_request permission sans request_id")
-            return
-        }
-        val toolName = request.get("tool_name")?.asString ?: "tool"
-        val toolInput = request.get("tool_input")
-        dispatchPermission(requestId, toolName, toolInput, blockedPath = null)
-    }
+    // (extraction control_request/sdk_control_request → ClaudeStreamParser.CanUseTool)
 
     /**
      * Flow permission unifié pour les deux formats claude :
@@ -906,168 +765,38 @@ class ClaudeCliBackend(
         }
     }
 
-    private fun handleControlResponse(json: JsonObject) {
-        val requestId = json.get("request_id")?.asString
-        val response = json.getAsJsonObject("response")
-        val subtype = response?.get("subtype")?.asString
-        val isError = subtype == "error" || (response != null && response.get("error") != null)
-        val errMsg = if (isError) {
-            response?.get("error")?.asString
-                ?: response?.toString()
-                ?: "unknown error"
-        } else null
-
-        if (isError) {
-            log.warn("CLI control_response error for $requestId: $errMsg")
-            pluginLog.error("control_response", "req=$requestId error=$errMsg")
-            notifyError("Setting change failed: $errMsg")
+    private fun handleControlResponseEvent(e: ClaudeEvent.ControlResponse) {
+        if (!e.success) {
+            log.warn("CLI control_response error for ${e.requestId}: ${e.error}")
+            pluginLog.error("control_response", "req=${e.requestId} error=${e.error}")
+            notifyError("Setting change failed: ${e.error}")
         } else {
-            log.info("CLI control_response OK for $requestId")
-            pluginLog.info("control_response", "req=$requestId OK")
+            pluginLog.info("control_response", "req=${e.requestId} OK")
         }
-        if (requestId != null) {
-            val cb = pendingControlRequests.remove(requestId)
-            cb?.invoke(!isError, errMsg)
-        }
+        e.requestId?.let { pendingControlRequests.remove(it)?.invoke(e.success, e.error) }
     }
 
-    private fun handleToolUse(block: JsonObject) {
-        val toolName = block.get("name")?.asString ?: return
-        val toolUseId = block.get("id")?.asString
-        val input = block.getAsJsonObject("input")
-
-        val planContent = if (toolName == "ExitPlanMode") input?.get("plan")?.asString else null
-        val userQuestionsJson = if (toolName == "AskUserQuestion") {
-            input?.getAsJsonArray("questions")?.toString()
-        } else null
-        if (planContent != null || userQuestionsJson != null) {
-            val info = ToolCallInfo(
-                toolCallId = toolUseId,
-                title = toolName,
-                kind = "interactive",
-                status = "in_progress",
-                path = null,
-                command = null,
-                sessionId = _sessionId,
-                planContent = planContent,
-                userQuestionsJson = userQuestionsJson
-            )
-            onToolCall?.invoke(info)
-            return
-        }
-
-        val path = input?.get("file_path")?.asString
-            ?: input?.get("path")?.asString
-            ?: input?.get("filePath")?.asString
-        val command = input?.get("command")?.asString
-        val writeContent = input?.get("content")?.asString
-        val editOld = input?.get("old_string")?.asString
-        val editNew = input?.get("new_string")?.asString
-        val detail = when (toolName) {
-            "Grep", "Glob" -> input?.get("pattern")?.asString?.let { pat ->
-                val path2 = input.get("path")?.asString
-                if (path2 != null) "$pat in $path2" else pat
-            }
-            "WebFetch" -> input?.get("url")?.asString
-            "WebSearch" -> input?.get("query")?.asString
-            "Task" -> {
-                val desc = input?.get("description")?.asString
-                val agentType = input?.get("subagent_type")?.asString
-                val prompt = input?.get("prompt")?.asString?.take(80)
-                when {
-                    desc != null && agentType != null -> "$agentType — $desc"
-                    desc != null -> desc
-                    agentType != null -> "sub-agent: $agentType"
-                    prompt != null -> prompt
-                    else -> null
-                }
-            }
-            "TodoWrite" -> input?.getAsJsonArray("todos")?.let { todos ->
-                val active = (0 until todos.size())
-                    .mapNotNull { todos[it].asJsonObject?.get("activeForm")?.asString }
-                    .firstOrNull()
-                if (active != null) "${todos.size()} todos — $active" else "${todos.size()} todo(s)"
-            }
-            "Skill" -> input?.get("skill")?.asString
-            "Bash" -> command ?: input?.get("description")?.asString
-            "Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "NotebookRead" -> path
-            "ToolSearch" -> input?.get("query")?.asString
-            "AskUserQuestion" -> {
-                val qs = input?.getAsJsonArray("questions")
-                when {
-                    qs == null || qs.size() == 0 -> "(no question)"
-                    qs.size() == 1 -> qs[0].asJsonObject?.get("question")?.asString?.take(100) ?: "(question)"
-                    else -> "${qs.size()} questions"
-                }
-            }
-            "ExitPlanMode" -> {
-                input?.get("plan")?.asString
-                    ?.lineSequence()
-                    ?.firstOrNull { it.isNotBlank() && !it.startsWith("#") }
-                    ?.take(80)
-                    ?: "(plan submitted)"
-            }
-            "TaskCreate" -> input?.get("subject")?.asString
-            "TaskUpdate" -> {
-                val tid = input?.get("taskId")?.asString
-                val status = input?.get("status")?.asString
-                listOfNotNull(tid?.let { "#$it" }, status).joinToString(" → ")
-                    .ifEmpty { null }
-            }
-            "TaskList", "TaskGet" -> input?.get("taskId")?.asString?.let { "#$it" }
-            else -> {
-                if (toolName.startsWith("mcp__")) {
-                    input?.entrySet()
-                        ?.joinToString(", ", limit = 3, truncated = "…") { "${it.key}=${it.value.toString().take(40)}" }
-                } else {
-                    // Fallback générique : 1er champ string non-vide de l'input
-                    input?.entrySet()
-                        ?.firstOrNull { it.value.isJsonPrimitive }
-                        ?.let { "${it.key}=${it.value.toString().take(60)}" }
-                }
-            }
-        }
-
-        val permMode = permissionModeOverride ?: _config.currentModeId
-
-        val kind = when (toolName) {
-            "Write", "Edit", "MultiEdit" -> "edit"
-            "Bash" -> "execute"
-            "Read" -> "read"
-            else -> null
-        }
-        val info = ToolCallInfo(
-            toolCallId = toolUseId,
-            title = toolName,
-            kind = kind,
-            status = "in_progress",
-            path = path,
-            command = command,
-            sessionId = _sessionId,
-            writeContent = writeContent,
-            editOldString = editOld,
-            editNewString = editNew,
-            permissionMode = permMode,
-            detail = detail
+    private fun handleToolUse(e: ClaudeEvent.ToolUse) {
+        // Mapping riche (detail par tool, plan/questions, write/edit content) → ToolCallMapper,
+        // pur et testé contre les fixtures. Ici : uniquement les effets VFS.
+        val info = ToolCallMapper.fromToolUse(
+            e, _sessionId, permissionModeOverride ?: _config.currentModeId
         )
         onToolCall?.invoke(info)
 
-        // Pre-capture + retries refresh + fallback addOrUpdate
-        if (path != null) {
-            val tracked = shouldTrackFile(path)
-            pluginLog.info("vfs",
-                "📁 tool=$toolName path=$path tracked=$tracked basePath=${project.basePath}")
-            if (tracked) {
-                if (!toolCallPreCapturedBefore.containsKey(path)) {
-                    val before = readFileContent(path)
-                    toolCallPreCapturedBefore[path] = before
-                    pluginLog.info("vfs", "📷 BEFORE captured (${before.length} chars) for $path")
-                }
-                if (toolName in setOf("Write", "Edit", "MultiEdit")) {
-                    pluginLog.info("vfs", "⏰ scheduling VFS refresh + fallback for $path")
-                    scheduleVfsRefreshAndFallback(path)
-                }
-            }
+        val path = info.path ?: return
+        val tracked = shouldTrackFile(path)
+        pluginLog.info("vfs",
+            "📁 tool=${e.name} path=$path tracked=$tracked basePath=${project.basePath}")
+        if (!tracked) return
+        if (!toolCallPreCapturedBefore.containsKey(path)) {
+            val before = readFileContent(path)
+            toolCallPreCapturedBefore[path] = before
+            pluginLog.info("vfs", "📷 BEFORE captured (${before.length} chars) for $path")
+        }
+        if (e.name in setOf("Write", "Edit", "MultiEdit")) {
+            pluginLog.info("vfs", "⏰ scheduling VFS refresh + fallback for $path")
+            scheduleVfsRefreshAndFallback(path)
         }
     }
 
@@ -1078,36 +807,19 @@ class ClaudeCliBackend(
         originalInput: com.google.gson.JsonElement?,
         permissionSuggestionsJson: String?
     ) {
-        val w = writer ?: run {
-            pluginLog.error("permission",
-                "🔴🔴 writer is NULL when responding to req=$requestId — claude is gonna hang!")
-            return
-        }
-        val behaviorPayload = if (allow) {
-            val updatedInput = originalInput?.takeIf { it.isJsonObject }?.toString() ?: "{}"
-            // Si l'user a choisi "Allow always", on inclut updatedPermissions = règles que claude
-            // a suggérées. claude les applique pour le scope spécifié (session/localSettings).
-            val permsClause = if (permissionSuggestionsJson != null) {
-                ""","updatedPermissions":$permissionSuggestionsJson"""
-            } else ""
-            """"behavior":"allow","updatedInput":$updatedInput$permsClause"""
+        // Schéma wire golden-testé dans ClaudeRequests (updatedInput obligatoire au allow,
+        // updatedPermissions pour "Allow always").
+        val resp = if (allow) {
+            ClaudeRequests.permissionAllow(requestId, originalInput, permissionSuggestionsJson)
         } else {
-            val msg = reason ?: "Denied by user"
-            """"behavior":"deny","message":${escapeJson(msg)}"""
+            ClaudeRequests.permissionDeny(requestId, reason)
         }
-        val resp = """{"type":"control_response","response":{"subtype":"success",""" +
-            """"request_id":${escapeJson(requestId)},"response":{$behaviorPayload}}}"""
-        pluginLog.debug("permission",
-            "📤 WRITING response to claude stdin: $resp")
-        try {
-            w.write("$resp\n"); w.flush()
-            log.info("Permission response sent: allow=$allow req=$requestId")
+        if (writeLine(resp)) {
             pluginLog.info("permission",
                 "✓ response flushed to claude stdin: allow=$allow req=$requestId")
-        } catch (e: Exception) {
-            log.warn("Failed to write permission response", e)
+        } else {
             pluginLog.error("permission",
-                "🔴 Failed to write permission response: ${e.message}")
+                "🔴 Failed to write permission response req=$requestId — claude is gonna hang!")
         }
     }
 

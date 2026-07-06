@@ -52,6 +52,7 @@ class AcpSessionBackend(
     override var onStateChange: ((AgentState) -> Unit)? = null
     override var onSessionReady: ((String) -> Unit)? = null
     override var onTextChunk: ((String) -> Unit)? = null
+    override var onSyntheticOutput: ((String) -> Unit)? = null
     override var onThoughtChunk: ((String) -> Unit)? = null
     override var onToolCall: ((ToolCallInfo) -> Unit)? = null
     override var onPermission: ((PermissionRequest) -> Unit)? = null

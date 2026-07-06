@@ -516,6 +516,14 @@ class AgentNavToolWindowPanel(
             }
         }
 
+        backend.onSyntheticOutput = { text ->
+            // Sortie des slash builtin (/context /usage) : bloc markdown marqué "System",
+            // pas une vraie réponse du modèle (coût 0).
+            ui.invokeLater {
+                chatPanel.appendAssistantChunk("> ⚙ *System output*\n\n$text")
+            }
+        }
+
         backend.onThoughtChunk = { text ->
             ui.invokeLater {
                 chatPanel.appendThinkingChunk(text)

@@ -78,6 +78,11 @@ interface AgentBackend {
     /** Chunk de texte assistant (à concaténer dans la bulle courante). */
     var onTextChunk: ((String) -> Unit)?
 
+    /** Sortie système synthétique (slash builtin /context /usage — claude répond avec
+     *  model="<synthetic>", coût 0). À rendre comme bloc système, pas comme bulle assistant.
+     *  Si non câblé, le backend retombe sur onTextChunk. */
+    var onSyntheticOutput: ((String) -> Unit)?
+
     /** Chunk de "thinking" (panneau séparé / italique). */
     var onThoughtChunk: ((String) -> Unit)?
 
