@@ -71,4 +71,8 @@ class ChatSession(
     fun setEffort(level: String) {
         backend.setEffort(level)
     }
+
+    fun renameSession(title: String) {
+        backend.renameSession(title)
+    }
 }

@@ -68,6 +68,10 @@ interface AgentBackend {
     /** Change le niveau de thinking/effort. */
     fun setEffort(level: String)
 
+    /** Renomme la session côté agent (claude : control_request rename_session, persisté
+     *  dans le .jsonl → visible dans /resume du CLI). No-op par défaut (pas d'équivalent ACP). */
+    fun renameSession(title: String) {}
+
     // ─── Callbacks (le panel les set AVANT start()) ──────────────────────────────
     /** Transition d'état (STARTING → INITIALIZING → READY → …). */
     var onStateChange: ((AgentState) -> Unit)?

@@ -482,6 +482,20 @@ class ClaudeCliBackend(
         respawn()
     }
 
+    override fun renameSession(title: String) {
+        val trimmed = title.trim().take(120)
+        if (trimmed.isEmpty()) return
+        val requestId = "rename-${System.currentTimeMillis()}"
+        pendingControlRequests[requestId] = { success, err ->
+            if (!success) log.warn("rename_session rejected: $err")
+        }
+        if (writeLine(ClaudeRequests.renameSession(requestId, trimmed))) {
+            pluginLog.info("control", "✏️ rename_session sent: \"$trimmed\"")
+        } else {
+            pendingControlRequests.remove(requestId)
+        }
+    }
+
     /** Kill l'ancien process, spawn un nouveau avec --resume du même sid + overrides. */
     private fun respawn() {
         log.info("Respawning Claude CLI for sid=$_sessionId (model=$modelOverride, perm=$permissionModeOverride, effort=$effortOverride)")

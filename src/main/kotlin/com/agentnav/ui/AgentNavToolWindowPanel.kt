@@ -276,6 +276,8 @@ class AgentNavToolWindowPanel(
                 hasAutoRenamed = true
                 val title = txt.take(40).let { if (txt.length > 40) "$it…" else it }
                 renameContentCallback?.invoke(title)
+                // Titre aussi côté claude — chaque chat du plugin est lisible dans /resume.
+                chatSession.renameSession(title)
             }
             chatPanel.appendUserMessage(txt)
             // Une fois la conversation démarrée, on verrouille le choix d'agent pour ce chat.
@@ -884,6 +886,8 @@ class AgentNavToolWindowPanel(
     fun renameChat(newName: String) {
         hasAutoRenamed = true // empêche l'auto-rename ultérieur
         renameContentCallback?.invoke(newName)
+        // Répercute côté claude : titre persisté dans le .jsonl, visible dans /resume du CLI.
+        chatSession.renameSession(newName)
     }
 
     /** Permet à AddSelectionToChatAction (ou autre extension) d'ajouter un attachment. */
