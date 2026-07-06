@@ -6,8 +6,8 @@ plugins {
     id("org.jetbrains.intellij.platform") version "2.15.0"
 }
 
-group = "com.claudeacp"
-version = "0.1.0"
+group = "com.agentnav"
+version = "0.9.0"
 
 repositories {
     mavenCentral()
@@ -18,7 +18,14 @@ repositories {
 
 dependencies {
     intellijPlatform {
-        intellijIdea("2026.1.1")
+        // La sandbox runIde MODIFIE sa distribution au boot (création de jbr/lib/extensions).
+        // Si cette distribution vient du cache transforms gradle (immutable), chaque runIde le
+        // corrompt → "The contents of the immutable workspace have been modified" à tout sync
+        // suivant. Fix : utiliser une installation IDE locale (localIdePath dans
+        // gradle.properties) ; fallback téléchargement pour la CI.
+        val localIde = providers.gradleProperty("localIdePath").orNull
+            ?.takeIf { it.isNotBlank() && file(it).exists() }
+        if (localIde != null) local(localIde) else intellijIdea("2026.1.1")
     }
     
     implementation("com.google.code.gson:gson:2.11.0")
@@ -37,6 +44,12 @@ kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_21)
     }
+}
+
+tasks.named<org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask>("runIde") {
+    // La sandbox 2026.1 crashe sous Wayland natif (NPE WLWindowPeer.reactivate au
+    // WelcomeScreen). Force XToolkit (XWayland) le temps que JetBrains fixe WLToolkit.
+    jvmArgs("-Dawt.toolkit.name=XToolkit")
 }
 
 intellijPlatform {

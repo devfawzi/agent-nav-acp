@@ -1,10 +1,10 @@
 <idea-plugin>
-    <id>com.claudeacp.bridge</id>
-    <name>AgentNav ACP</name>
-    <vendor email="you@example.com" url="https://github.com/devfawzi/agent-nav-acp">DevFawzi</vendor>
+    <id>com.agentnav</id>
+    <name>AgentNav</name>
+    <vendor email="devfawzi@gmail.com" url="https://github.com/devfawzi/agent-nav-acp">DevFawzi</vendor>
 
     <description><![CDATA[
-        <h2>AgentNav ACP — Cursor-style coding agent for JetBrains IDEs</h2>
+        <h2>AgentNav — Cursor-style coding agent for JetBrains IDEs</h2>
 
         <p>Brings <b>Claude Code</b> straight into IntelliJ as a fully interactive coding agent,
         with native diff review, multi-tab chats, MCP servers, skills, and session resume —
@@ -43,13 +43,17 @@
 
         <h3>Requirements</h3>
         <ul>
-            <li>Claude Code CLI installed (<code>curl -fsSL https://claude.ai/install.sh | bash</code>),
-                signed in once via <code>claude</code>.</li>
+            <li><b>Claude Code CLI ≥ 2.1.0</b> (<code>curl -fsSL https://claude.ai/install.sh | bash</code>),
+                signed in once via <code>claude</code>. The plugin relies on the bidirectional
+                <code>stream-json</code> protocol introduced in 2.1 (<code>control_request</code> /
+                <code>can_use_tool</code> permission flow). Versions &lt; 2.1 will not surface
+                Allow/Deny cards correctly.</li>
             <li>Optional: <code>npx</code> in PATH (auto-detected from nvm/volta) for OpenCode
                 and MCP servers spawned via npm.</li>
+            <li>JetBrains IDE 2024.2 or newer.</li>
         </ul>
 
-        <p>Open <i>Tools → AgentNav ACP</i> for settings, or use the tool window on the
+        <p>Open <i>Tools → AgentNav</i> for settings, or use the tool window on the
         right after install.</p>
     ]]></description>
 
@@ -60,35 +64,34 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <!-- Tool Window unique : chat + liste prompts + liste pending changes -->
-        <toolWindow id="AgentNav ACP"
+        <toolWindow id="AgentNav"
                     anchor="right"
-                    factoryClass="com.claudeacp.ClaudeACPToolWindowFactory"
+                    factoryClass="com.agentnav.ui.AgentNavToolWindowFactory"
                     icon="AllIcons.Actions.Lightning"/>
 
         <!-- Services -->
-        <projectService serviceImplementation="com.claudeacp.ClaudeACPService"/>
-        <projectService serviceImplementation="com.claudeacp.PromptHistoryService"/>
-        <projectService serviceImplementation="com.claudeacp.PendingChangesService"/>
-        <projectService serviceImplementation="com.claudeacp.DiffViewerManager"/>
-        <projectService serviceImplementation="com.claudeacp.PluginLogService"/>
-        <applicationService serviceImplementation="com.claudeacp.AgentSettings"/>
-        <applicationService serviceImplementation="com.claudeacp.AgentProfilesService"/>
-        <applicationService serviceImplementation="com.claudeacp.DiffPaletteService"/>
+        <projectService serviceImplementation="com.agentnav.services.PromptHistoryService"/>
+        <projectService serviceImplementation="com.agentnav.services.PendingChangesService"/>
+        <projectService serviceImplementation="com.agentnav.services.DiffViewerManager"/>
+        <projectService serviceImplementation="com.agentnav.services.PluginLogService"/>
+        <applicationService serviceImplementation="com.agentnav.settings.AgentSettings"/>
+        <applicationService serviceImplementation="com.agentnav.services.AgentProfilesService"/>
+        <applicationService serviceImplementation="com.agentnav.services.DiffPaletteService"/>
 
-        <!-- Settings : Tools → AgentNav ACP -->
+        <!-- Settings : Tools → AgentNav -->
         <applicationConfigurable
             parentId="tools"
-            instance="com.claudeacp.AgentSettingsConfigurable"
-            id="com.claudeacp.settings"
-            displayName="AgentNav ACP"/>
+            instance="com.agentnav.settings.AgentSettingsConfigurable"
+            id="com.agentnav.settings"
+            displayName="AgentNav"/>
     </extensions>
 
     <actions>
         <!-- Action contextuelle dans les éditeurs : Ctrl+Alt+L pour ajouter la sélection
              courante au chat AgentNav (style Cursor). Aussi disponible via right-click
              dans l'éditeur. -->
-        <action id="com.claudeacp.AddSelectionToChat"
-                class="com.claudeacp.AddSelectionToChatAction"
+        <action id="com.agentnav.AddSelectionToChat"
+                class="com.agentnav.services.AddSelectionToChatAction"
                 text="Add Selection to AgentNav Chat"
                 description="Attach the current editor selection (with file:line range) to the active AgentNav chat.">
             <keyboard-shortcut keymap="$default" first-keystroke="control alt L"/>

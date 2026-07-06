@@ -1,3 +1,5 @@
+> ⚠️ Document historique (pré-rework 2026-07-06). Architecture courante : voir docs/superpowers/specs/2026-07-06-agentnav-rework-design.md.
+
 # AgentNav ACP — Contexte complet pour reprise de chat
 
 ## Projet

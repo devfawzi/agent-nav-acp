@@ -2,6 +2,15 @@
 
 Brainstorm 2026-05-15. À benchmarker / valider / arbitrer avec l'user. Ce n'est pas une roadmap engagée, juste un menu d'options classées par impact perçu.
 
+## ⏳ À tester (en attente de validation user)
+
+Implémenté techniquement mais pas encore validé visuellement / fonctionnellement en sandbox.
+À passer en ✅ DONE quand l'user a confirmé que ça marche en conditions réelles.
+
+- **#4 Reconnect auto sur crash** — simuler un crash claude (`kill -9` du process pendant un turn) puis relancer un prompt. Doit voir notif "Claude reconnected" et reprendre.
+- **#31 Cost cap hebdo** — set Settings → Weekly budget à \$0.10 → envoyer 2-3 prompts → voir warning à 80% puis confirmation à 100%. Bouton "Reset week counter" qui RAZ.
+- **#32 Sub-agents UI** — `/agent` → submenu avec Explore/Plan/general-purpose → click → texte inséré dans le textarea.
+
 ## ✅ Déjà livré
 
 ### Vague du 2026-05-16
@@ -11,8 +20,12 @@ Brainstorm 2026-05-15. À benchmarker / valider / arbitrer avec l'user. Ce n'est
 - **#37** Memory paths inspector — action title-bar qui liste les .md de mémoire auto + open/delete.
 - **#43** Logger panel — action title-bar avec dialog filtrable (level, category) + clear/copy. Tracé control_request/response, state changes.
 - **DiffViewer custom toolbar** — Accept all / Reject all / Customize colors. Hunk-by-hunk granulaire via ⮜⮞ natifs IntelliJ.
+- **Diff palettes** (Pastel/Soft/Vivid/HighContrast/Custom) avec live preview dialog
 - **Settings shortcut** — action ⚙ dans la title-bar de la tool window.
 - **#36** Output style switcher — **abandonné** : `set_output_style` non supporté par claude 2.1.123 (test : "Unsupported control request subtype").
+- **#4** Reconnect auto sur crash claude — respawn via `--resume <sid>` avec backoff (1s, 5s, 30s) limité à 3 essais.
+- **#31** Cost cap & weekly budget — Settings UI : budget hebdo $, soft warning 80%, hard stop 100% avec confirmation. Reset auto chaque lundi 00:00.
+- **#32** Sub-agents UI — slash command `/agent` avec submenu listant Explore / Plan / general-purpose / custom user agents. Click = insère un prompt template.
 
 ### Vague du 2026-05-15
 - **#1** Inline diff dans le chat — clic sur la card file expand un diff line-by-line avec couleurs voyantes rouge/vert.
@@ -20,7 +33,7 @@ Brainstorm 2026-05-15. À benchmarker / valider / arbitrer avec l'user. Ce n'est
 - **#3** Token/coût discret — petit label à côté de History (`1.2k tok · $0.05`), tooltip avec détails (input/output/cache).
 - **#5** Indicateur live d'activité — bandeau au-dessus du chat (`📖 Read MyFile.kt`, `⚙ Bash: npm test`, `🤔 Thinking…`, `✍ Writing reply…`).
 - **#44** Resume picker — skip wrappers (`<local-command-caveat>`, `<system-reminder>`, `<local-command-stdout>`, …), affichage first + last user message avec dates, utilisation du `summary` si présent.
-- **#45** Slash commands `/mode` `/model` `/effort` `/skill` `/mcp` — interceptés par le plugin, ouvrent une `SlashPickerCard` interactive dans le chat. Dropdowns du toolbar supprimés.
+- **#45** Slash commands `/mode` `/model` `/effort` `/Yskill` `/mcp` — interceptés par le plugin, ouvrent une `SlashPickerCard` interactive dans le chat. Dropdowns du toolbar supprimés.
 - **#46** Skill Python `extract-context` — parse un .jsonl en markdown propre (wrappers/thinking/tool noise strippés). Options `--last N`, `--since YYYY-MM-DD`. Installer `skills/install.sh`.
 - **#47** Input panel redesign — boutons icon-only 28×28 (+ et ▶/⏹), footer compact, hauteur textarea ÷2.
 
@@ -51,7 +64,7 @@ Tres bien ca mais ca doit etre sur la ViewEditor avec une diff rouge voyant et v
 **Risque** : aucun, sauf bruit visuel si trop chargé.
 Tres discret juste a coté de history en haut a droite en petit
 
-### 4. Reconnect automatique sur crash claude
+### 4. Reconnect automatique sur crash claude ⏳ TO TEST (2026-05-16 — pending user validation)
 **État actuel** : si claude crashe en plein turn, le proc disparaît et l'user voit "No Claude CLI process available" au prochain prompt.
 **Proposition** : dans `processTerminated`, si `executingSessionId != null` ET exit != 0 ET sid claimé, auto-respawn avec `--resume <sid>` après backoff (1s, 5s, 30s). Notify l'user "Claude reconnected".
 **Effort** : moyen (1 jour, plus tests edge cases).
@@ -146,13 +159,13 @@ Question comment il se declenche ?
 ## ⚡ Bonus — performance / coût
 
 
-### 31. Cost cap & weekly budget
+### 31. Cost cap & weekly budget ⏳ TO TEST (2026-05-16 — pending user validation)
 Settings → budget mensuel / hebdomadaire en $. Soft warning à 80%, hard stop à 100% avec confirmation. Lecture des coûts via les events `total_cost_usd`. Histogramme par jour dans Tools → AgentNav → Usage.
 *Effort : moyen (1-2j surtout UI). Risque : aucun.*
 
 ## 🧠 Bonus — features Claude Code non exposées
 
-### 32. Sub-agents UI
+### 32. Sub-agents UI ⏳ TO TEST (2026-05-16 — pending user validation)
 `system:init.agents` liste `[Explore, general-purpose, Plan, statusline-setup, custom user agents…]`. Dropdown dédié dans le toolbar pour invoquer un sub-agent (équivalent CLI `--agent <name>`). Le sub-agent prend un prompt isolé sans polluer la conv principale.
 *Effort : moyen (1j). Risque : aucun.*
 Tres bien ca mais faudras utiliser pas mal de raccourci avec / pour ne pas remplir l'ui du chat
