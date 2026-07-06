@@ -1,6 +1,6 @@
-# AgentNav ACP — IntelliJ Plugin
+# AgentNav — IntelliJ Plugin
 
-IntelliJ plugin that integrates **Claude Code** into the IDE through the **ACP** (Agent Client Protocol). Inspired by Cursor, with a UX tailored to JetBrains IDEs:
+IntelliJ plugin that integrates **Claude Code** directly into the IDE (native CLI stream-json, stays on your subscription plan), plus **OpenCode and any ACP-compatible agent**. Claude Code is the default agent. Inspired by Cursor, with a UX tailored to JetBrains IDEs:
 
 - 💬 Modern chat with Markdown rendering
 - 🔄 Multi-session tabs (each chat = independent ACP `sessionId`)
@@ -117,7 +117,7 @@ Launches a temporary IntelliJ instance with the plugin loaded. Handy for develop
 
 ## 🤝 Multi-agent support
 
-AgentNav ACP works with **any ACP-compatible agent**. Two profiles are bundled out of the box:
+AgentNav works with **any ACP-compatible agent**. Two profiles are bundled out of the box:
 
 | Agent | Default launch command | Auth location |
 |---|---|---|
@@ -143,7 +143,7 @@ opencode auth login
 ```
 
 > ⚠️ **IMPORTANT — After installing OpenCode (or any agent)** :
-> open the plugin's **Settings → Tools → AgentNav ACP** and click **"Auto-detect now"**.
+> open the plugin's **Settings → Tools → AgentNav** and click **"Auto-detect now"**.
 > This refreshes the cached binary path. Without this step the plugin may keep using
 > the npx fallback (or fail to find the binary at all).
 >
@@ -159,7 +159,7 @@ curl -fsSL https://claude.ai/install.sh | bash
 # Sign in (opens a browser)
 claude
 
-# After install: Settings → Tools → AgentNav ACP → Auto-detect now
+# After install: Settings → Tools → AgentNav → Auto-detect now
 ```
 
 ### Switching agents
@@ -177,7 +177,7 @@ switch between agents on the fly. Switching:
 Any agent that implements the [Agent Client Protocol](https://agentclientprotocol.com/)
 can be added manually:
 
-1. **Settings → Tools → AgentNav ACP**
+1. **Settings → Tools → AgentNav**
 2. **Add custom…** in the *Agents* section
 3. Fill in:
    - **Display name** — shown in the dropdown
@@ -206,7 +206,7 @@ On startup, the plugin locates `claude` and `npx` **without any required configu
    export CLAUDE_CLI_PATH=/custom/path/claude
    export NPX_PATH=/custom/path/npx
    ```
-2. **IntelliJ Settings** — `Settings → Tools → AgentNav ACP` (manual override with file picker)
+2. **IntelliJ Settings** — `Settings → Tools → AgentNav` (manual override with file picker)
 3. **Common paths** — auto-discovery in: `~/.local/bin`, `~/.npm-global/bin`, `~/.nvm/versions/node/*/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, `%APPDATA%\npm\` (Windows), JetBrains-bundled Node runtime, etc.
 4. **`which` / `where`** — last resort
 
@@ -216,7 +216,7 @@ If nothing is found, the UI shows an **onboarding panel** with copyable install 
 
 ## 🎮 Usage
 
-1. **View → Tool Windows → AgentNav ACP** (⚡ icon on the right)
+1. **View → Tool Windows → AgentNav** (⚡ icon on the right)
 2. The agent starts automatically (state shown in the header: `🚀 Starting...` → `✅ Ready`)
 3. Type your prompt and press **Enter** (Shift+Enter for newline)
 4. When Claude modifies a file:
@@ -249,7 +249,7 @@ src/main/kotlin/com/claudeacp/
 ├── DiffViewerManager.kt             # Editor-tab diff with auto-refresh on changes
 ├── AgentBinaryResolver.kt           # Binary auto-discovery (env → settings → which)
 ├── AgentSettings.kt                 # Persistent settings (path overrides)
-├── AgentSettingsConfigurable.kt     # Settings page: Tools → AgentNav ACP
+├── AgentSettingsConfigurable.kt     # Settings page: Tools → AgentNav
 ├── ClaudeACPToolWindowFactory.kt    # Native IntelliJ multi-session tabs
 ├── ClaudeACPToolWindowPanel.kt      # Main tool window UI
 ├── ChatPanel.kt                     # Modern chat (bubbles, thinking, tools, run cmd)
@@ -264,7 +264,7 @@ src/main/kotlin/com/claudeacp/
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| "Setup required" panel on launch | `claude` or `npx` not found | Follow the panel instructions, or set paths in `Settings → Tools → AgentNav ACP` |
+| "Setup required" panel on launch | `claude` or `npx` not found | Follow the panel instructions, or set paths in `Settings → Tools → AgentNav` |
 | Agent doesn't respond | Not logged into Claude Code | Run `claude` in a terminal to (re)sign in |
 | Diff doesn't open automatically | Linux `inotify` limit reached | See *Raise inotify limit* above |
 | "Method not found" | ACP version too old (cached) | `npx clear-npx-cache` then restart the IDE |
