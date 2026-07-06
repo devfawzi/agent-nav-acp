@@ -3,8 +3,8 @@ package com.claudeacp.core
 import com.claudeacp.AgentProfile
 import com.claudeacp.PromptAttachment
 import com.claudeacp.Transport
+import com.claudeacp.acp.AcpSessionBackend
 import com.claudeacp.backend.ClaudeCliBackend
-import com.claudeacp.backend.OpenCodeAcpBackend
 import com.intellij.openapi.project.Project
 
 /**
@@ -24,14 +24,13 @@ class ChatSession(
 ) {
 
     /**
-     * Backend agent : 1 process claude (CLI) ou 1 vue sur le hub ACP (OpenCode).
-     * Aujourd'hui seul CLI est routé via AgentBackend ; les profils ACP/OpenCode passent
-     * par le legacy ClaudeACPService (phase 3 reportée).
+     * Backend agent : 1 process claude (CLI) ou 1 session isolée sur le hub ACP (OpenCode,
+     * agents custom). Même contrat AgentBackend dans les deux cas.
      */
     val backend: AgentBackend = when (profile.transport) {
         Transport.CLI_STREAM_JSON ->
             ClaudeCliBackend(project, profile, resumeSid = resumeSid, cwdOverride = cwdOverride)
-        else -> OpenCodeAcpBackend(project, profile)
+        else -> AcpSessionBackend(project, profile)
     }
 
     /** Convenience : sessionId du backend (pour rename de tab, sessionLabel, etc.). */
