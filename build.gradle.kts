@@ -6,8 +6,8 @@ plugins {
     id("org.jetbrains.intellij.platform") version "2.15.0"
 }
 
-group = "com.claudeacp"
-version = "0.1.0"
+group = "com.agentnav"
+version = "0.9.0"
 
 repositories {
     mavenCentral()

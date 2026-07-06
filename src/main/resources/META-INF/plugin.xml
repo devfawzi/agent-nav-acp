@@ -1,10 +1,10 @@
 <idea-plugin>
-    <id>com.agentnav.bridge</id>
-    <name>AgentNav ACP</name>
-    <vendor email="you@example.com" url="https://github.com/devfawzi/agent-nav-acp">DevFawzi</vendor>
+    <id>com.agentnav</id>
+    <name>AgentNav</name>
+    <vendor email="devfawzi@gmail.com" url="https://github.com/devfawzi/agent-nav-acp">DevFawzi</vendor>
 
     <description><![CDATA[
-        <h2>AgentNav ACP — Cursor-style coding agent for JetBrains IDEs</h2>
+        <h2>AgentNav — Cursor-style coding agent for JetBrains IDEs</h2>
 
         <p>Brings <b>Claude Code</b> straight into IntelliJ as a fully interactive coding agent,
         with native diff review, multi-tab chats, MCP servers, skills, and session resume —
@@ -53,7 +53,7 @@
             <li>JetBrains IDE 2024.2 or newer.</li>
         </ul>
 
-        <p>Open <i>Tools → AgentNav ACP</i> for settings, or use the tool window on the
+        <p>Open <i>Tools → AgentNav</i> for settings, or use the tool window on the
         right after install.</p>
     ]]></description>
 
@@ -64,26 +64,26 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <!-- Tool Window unique : chat + liste prompts + liste pending changes -->
-        <toolWindow id="AgentNav ACP"
+        <toolWindow id="AgentNav"
                     anchor="right"
-                    factoryClass="com.agentnav.AgentNavToolWindowFactory"
+                    factoryClass="com.agentnav.ui.AgentNavToolWindowFactory"
                     icon="AllIcons.Actions.Lightning"/>
 
         <!-- Services -->
-        <projectService serviceImplementation="com.agentnav.PromptHistoryService"/>
-        <projectService serviceImplementation="com.agentnav.PendingChangesService"/>
-        <projectService serviceImplementation="com.agentnav.DiffViewerManager"/>
-        <projectService serviceImplementation="com.agentnav.PluginLogService"/>
-        <applicationService serviceImplementation="com.agentnav.AgentSettings"/>
-        <applicationService serviceImplementation="com.agentnav.AgentProfilesService"/>
-        <applicationService serviceImplementation="com.agentnav.DiffPaletteService"/>
+        <projectService serviceImplementation="com.agentnav.services.PromptHistoryService"/>
+        <projectService serviceImplementation="com.agentnav.services.PendingChangesService"/>
+        <projectService serviceImplementation="com.agentnav.services.DiffViewerManager"/>
+        <projectService serviceImplementation="com.agentnav.services.PluginLogService"/>
+        <applicationService serviceImplementation="com.agentnav.settings.AgentSettings"/>
+        <applicationService serviceImplementation="com.agentnav.services.AgentProfilesService"/>
+        <applicationService serviceImplementation="com.agentnav.services.DiffPaletteService"/>
 
-        <!-- Settings : Tools → AgentNav ACP -->
+        <!-- Settings : Tools → AgentNav -->
         <applicationConfigurable
             parentId="tools"
-            instance="com.agentnav.AgentSettingsConfigurable"
+            instance="com.agentnav.settings.AgentSettingsConfigurable"
             id="com.agentnav.settings"
-            displayName="AgentNav ACP"/>
+            displayName="AgentNav"/>
     </extensions>
 
     <actions>
@@ -91,7 +91,7 @@
              courante au chat AgentNav (style Cursor). Aussi disponible via right-click
              dans l'éditeur. -->
         <action id="com.agentnav.AddSelectionToChat"
-                class="com.agentnav.AddSelectionToChatAction"
+                class="com.agentnav.services.AddSelectionToChatAction"
                 text="Add Selection to AgentNav Chat"
                 description="Attach the current editor selection (with file:line range) to the active AgentNav chat.">
             <keyboard-shortcut keymap="$default" first-keystroke="control alt L"/>
