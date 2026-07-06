@@ -1,9 +1,0 @@
-Notes libres
-============
-
-Ce fichier est un bloc-notes de test.
-Tu peux y écrire ce que tu veux.
-
-- ligne 1
-- ligne 2
-- ligne 3
