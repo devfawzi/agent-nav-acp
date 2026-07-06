@@ -607,6 +607,14 @@ class ClaudeCliBackend(
             onMemoryPaths?.invoke(paths)
         }
 
+        // Persiste slash commands / skills / MCP servers pour peupler le popup `/` et le
+        // picker /mcp AVANT le 1er prompt des prochaines sessions (parité TUI claude).
+        AgentSettings.getInstance().apply {
+            updateSlashCommandsCache(slashCommands)
+            updateSkillsCache(skills)
+            updateMcpServersCache(mcpServers.associate { it.name to it.status })
+        }
+
         val newConfig = SessionConfig(
             models = CLAUDE_MODELS,
             modes = CLAUDE_PERMISSION_MODES,
@@ -1274,13 +1282,24 @@ class ClaudeCliBackend(
         val initialMode = args.indexOf("--permission-mode").let { idx ->
             if (idx >= 0 && idx + 1 < args.size) args[idx + 1] else "acceptEdits"
         }
+        // Le system:init n'arrive qu'après le 1er prompt : on pré-peuple slash commands,
+        // skills et MCP depuis les caches persistés du dernier init + les builtins connus,
+        // pour que le popup `/` et /mcp soient utilisables immédiatement (parité TUI).
+        val settings = AgentSettings.getInstance()
+        val cachedSlash = settings.getSlashCommandsCache()
+        val cachedServers = settings.getMcpServersCache()
+        val cachedTools = settings.getMcpToolsCache()
         return SessionConfig(
             models = CLAUDE_MODELS,
             modes = CLAUDE_PERMISSION_MODES,
             configOptions = listOf(CLAUDE_EFFORT_OPTION),
             currentModelId = null,
             currentModeId = initialMode,
-            currentConfigValues = mapOf("thinking" to "auto")
+            currentConfigValues = mapOf("thinking" to "auto"),
+            slashCommands = (BUILTIN_SLASH_COMMANDS + cachedSlash).distinct().sorted(),
+            mcpServers = cachedServers.map { (name, status) -> McpServerInfo(name, status) },
+            mcpTools = cachedTools.flatMap { (srv, tools) -> tools.map { "mcp__${srv}__$it" } },
+            skills = settings.getSkillsCache()
         )
     }
 
@@ -1417,6 +1436,15 @@ class ClaudeCliBackend(
             SelectOption("acceptEdits", "Accept edits", "Auto-approve Write/Edit"),
             SelectOption("bypassPermissions", "Bypass all", "Auto-approve everything (use with care)"),
             SelectOption("plan", "Plan", "Read-only — preview without writing to disk")
+        )
+
+        /**
+         * Slash commands builtin toujours présentes (observées dans system:init claude 2.1.201).
+         * Fallback si aucun cache : le popup `/` n'est jamais vide, même au tout 1er lancement.
+         */
+        private val BUILTIN_SLASH_COMMANDS = listOf(
+            "compact", "context", "config", "usage", "init", "review",
+            "security-review", "agents", "clear"
         )
 
         private val CLAUDE_EFFORT_OPTION = ConfigOption(

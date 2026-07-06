@@ -37,6 +37,16 @@ class AgentSettings : PersistentStateComponent<AgentSettings.State> {
          */
         var mcpToolsCacheCsv: MutableMap<String, String> = mutableMapOf(),
         /**
+         * Caches des slash commands / skills / MCP servers du dernier `system:init`, persistés
+         * entre runs. Le system:init n'arrive qu'APRÈS le 1er prompt d'une session : sans ces
+         * caches, le popup `/` et le picker /mcp seraient vides au démarrage d'un chat
+         * (contrairement au TUI claude qui affiche tout immédiatement).
+         */
+        var slashCommandsCacheCsv: String = "",
+        var skillsCacheCsv: String = "",
+        /** Format : "name:status,name:status". */
+        var mcpServersCacheCsv: String = "",
+        /**
          * Si true, à chaque prompt envoyé, on ajoute en fin de message la liste des
          * errors/warnings du buffer éditeur courant (LSP diagnostics). Style Cursor :
          * claude voit directement "fix these errors" sans copier/coller.
@@ -170,6 +180,31 @@ class AgentSettings : PersistentStateComponent<AgentSettings.State> {
         state.mcpToolsCacheCsv = toolsByServer
             .mapValues { it.value.joinToString(",") }
             .toMutableMap()
+    }
+
+    fun getSlashCommandsCache(): List<String> =
+        state.slashCommandsCacheCsv.split(",").filter { it.isNotBlank() }
+
+    fun updateSlashCommandsCache(cmds: List<String>) {
+        if (cmds.isNotEmpty()) state.slashCommandsCacheCsv = cmds.joinToString(",")
+    }
+
+    fun getSkillsCache(): List<String> =
+        state.skillsCacheCsv.split(",").filter { it.isNotBlank() }
+
+    fun updateSkillsCache(skills: List<String>) {
+        if (skills.isNotEmpty()) state.skillsCacheCsv = skills.joinToString(",")
+    }
+
+    fun getMcpServersCache(): Map<String, String> =
+        state.mcpServersCacheCsv.split(",")
+            .filter { it.contains(":") }
+            .associate { it.substringBeforeLast(":") to it.substringAfterLast(":") }
+
+    fun updateMcpServersCache(servers: Map<String, String>) {
+        if (servers.isNotEmpty()) {
+            state.mcpServersCacheCsv = servers.entries.joinToString(",") { "${it.key}:${it.value}" }
+        }
     }
 
     companion object {

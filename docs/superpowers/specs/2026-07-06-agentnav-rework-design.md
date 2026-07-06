@@ -95,6 +95,22 @@ Le contrat `AgentBackend` ne change pas : l'UI ne distingue pas Claude d'un agen
 
 Événement/subtype inconnu → `ClaudeEvent.Unknown` → log structuré (PluginLogService, catégorie `protocol`) + rendu dégradé dans le chat. Jamais de crash, jamais de silence.
 
+### Parité slash commands avec le TUI (exigence user 2026-07-06, sondé sur claude 2.1.201)
+
+Comportement mesuré en stream-json bidirectionnel :
+
+| Commande envoyée | Réponse claude | Stratégie plugin |
+|---|---|---|
+| `/config`, `/usage`, `/context`, `/compact` (et la plupart des builtins) | Message assistant `model="<synthetic>"` avec le contenu (markdown/texte), `num_turns=0`, coût 0 | Laisser passer à claude, rendre la réponse |
+| `/config` sans args | Usage help peu utile | Intercepté → ouvre Settings AgentNav (✅ implémenté) |
+| `/mcp` | « /mcp isn't available in this environment » | Toujours intercepté → SlashPickerCard plugin (déjà le cas) |
+| `/mode` `/model` `/effort` `/skill` `/agent` | — | Interceptés → SlashPickerCards (déjà le cas) |
+
+- **Caches persistants** (✅ implémenté) : `system:init` n'arrive qu'après le 1er prompt → slash commands, skills et MCP servers/tools du dernier init sont persistés dans `AgentSettings` et pré-peuplent `defaultConfig()`, + fallback builtins hardcodés (`compact`, `context`, `config`, `usage`, `init`, `review`, `security-review`, `agents`, `clear`). Le popup `/` et `/mcp` ne sont plus jamais vides.
+- **Rendu des messages synthétiques** (Plan 2) : détecter `message.model == "<synthetic>"` → style distinct « sortie système » (pas une bulle assistant normale), markdown rendu (tableaux `/context`).
+- **Nouveaux events 2.1.201** : `system:hook_started` / `system:hook_response` (hooks SessionStart etc.) — aujourd'hui ignorés silencieusement ; le parser (Plan 2) doit les typer et l'UI peut les montrer discrètement (catégorie logs `hooks`).
+- Scénarios de capture du harness à étendre : slash builtins (`/context`, `/usage`, `/compact`), commande inconnue (`/nope`), hooks events.
+
 ## 5. Distribution & mises à jour automatiques
 
 - **`ci.yml`** : sur push/PR → `gradlew build` (compile + tests + `verifyPlugin`).

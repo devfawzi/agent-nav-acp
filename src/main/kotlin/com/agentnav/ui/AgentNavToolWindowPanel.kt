@@ -461,6 +461,12 @@ class AgentNavToolWindowPanel(
                     footer = footer
                 )
             }
+            "config" -> {
+                // Parité TUI : /config sans args ouvre le panneau de configuration.
+                // (/config key=value part à claude — non intercepté par PromptInputPanel.)
+                com.intellij.openapi.options.ShowSettingsUtil.getInstance()
+                    .showSettingsDialog(project, AgentSettingsConfigurable::class.java)
+            }
             else -> {
                 chatPanel.appendInfo("Unknown command: /$cmd")
             }

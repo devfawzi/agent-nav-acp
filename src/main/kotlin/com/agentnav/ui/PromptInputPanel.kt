@@ -128,8 +128,10 @@ class PromptInputPanel(
     private var onCancel: (() -> Unit)? = null
     private var onSlashCommand: ((cmd: String, args: String) -> Unit)? = null
 
-    /** Slash commands interceptés par le plugin (ne sont PAS envoyés à claude). */
-    private val PLUGIN_SLASH_COMMANDS = setOf("mode", "model", "effort", "skill", "skills", "mcp", "agent")
+    /** Slash commands interceptés par le plugin (ne sont PAS envoyés à claude).
+     *  Note : `/config` sans args ouvre les Settings AgentNav (parité panneau TUI) ;
+     *  `/config key=value` part à claude qui applique la config (réponse synthétique). */
+    private val PLUGIN_SLASH_COMMANDS = setOf("mode", "model", "effort", "skill", "skills", "mcp", "agent", "config")
 
     private val fileMentionPopup = FileMentionPopup(project, textArea) { entry ->
         replaceMentionToken(entry)
@@ -357,10 +359,17 @@ class PromptInputPanel(
                 description = "Invoke a sub-agent (Explore, Plan, …) on a specific task",
                 isPlugin = true,
                 submenuProvider = { buildAgentSubmenu() }
+            ),
+            SlashCommandPopup.Entry(
+                name = "config",
+                description = "Open AgentNav settings — or type /config key=value for claude",
+                isPlugin = true
             )
         )
         val skillSet = currentConfig.skills.toSet()
-        val claudeCmds = currentConfig.slashCommands.sorted().map { name ->
+        val claudeCmds = currentConfig.slashCommands
+            .filter { it.lowercase() !in PLUGIN_SLASH_COMMANDS }  // pas de doublon avec nos entrées
+            .sorted().map { name ->
             val isUserSkill = name in skillSet
             SlashCommandPopup.Entry(
                 name = name,
@@ -997,8 +1006,10 @@ class PromptInputPanel(
         // ne PAS envoyer à claude, déclencher un picker UI à la place.
         if (txt.startsWith("/")) {
             val first = txt.substringBefore(' ').substring(1).lowercase()
-            if (first in PLUGIN_SLASH_COMMANDS) {
-                val args = txt.substringAfter(' ', "").trim()
+            val args = txt.substringAfter(' ', "").trim()
+            // `/config key=value` est une vraie commande claude → laisser partir.
+            val interceptable = first in PLUGIN_SLASH_COMMANDS && !(first == "config" && args.isNotEmpty())
+            if (interceptable) {
                 onSlashCommand?.invoke(first, args)
                 textArea.text = ""
                 return
