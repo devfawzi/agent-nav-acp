@@ -1,5 +1,5 @@
 <idea-plugin>
-    <id>com.claudeacp.bridge</id>
+    <id>com.agentnav.bridge</id>
     <name>AgentNav ACP</name>
     <vendor email="you@example.com" url="https://github.com/devfawzi/agent-nav-acp">DevFawzi</vendor>
 
@@ -66,23 +66,23 @@
         <!-- Tool Window unique : chat + liste prompts + liste pending changes -->
         <toolWindow id="AgentNav ACP"
                     anchor="right"
-                    factoryClass="com.claudeacp.ClaudeACPToolWindowFactory"
+                    factoryClass="com.agentnav.AgentNavToolWindowFactory"
                     icon="AllIcons.Actions.Lightning"/>
 
         <!-- Services -->
-        <projectService serviceImplementation="com.claudeacp.PromptHistoryService"/>
-        <projectService serviceImplementation="com.claudeacp.PendingChangesService"/>
-        <projectService serviceImplementation="com.claudeacp.DiffViewerManager"/>
-        <projectService serviceImplementation="com.claudeacp.PluginLogService"/>
-        <applicationService serviceImplementation="com.claudeacp.AgentSettings"/>
-        <applicationService serviceImplementation="com.claudeacp.AgentProfilesService"/>
-        <applicationService serviceImplementation="com.claudeacp.DiffPaletteService"/>
+        <projectService serviceImplementation="com.agentnav.PromptHistoryService"/>
+        <projectService serviceImplementation="com.agentnav.PendingChangesService"/>
+        <projectService serviceImplementation="com.agentnav.DiffViewerManager"/>
+        <projectService serviceImplementation="com.agentnav.PluginLogService"/>
+        <applicationService serviceImplementation="com.agentnav.AgentSettings"/>
+        <applicationService serviceImplementation="com.agentnav.AgentProfilesService"/>
+        <applicationService serviceImplementation="com.agentnav.DiffPaletteService"/>
 
         <!-- Settings : Tools → AgentNav ACP -->
         <applicationConfigurable
             parentId="tools"
-            instance="com.claudeacp.AgentSettingsConfigurable"
-            id="com.claudeacp.settings"
+            instance="com.agentnav.AgentSettingsConfigurable"
+            id="com.agentnav.settings"
             displayName="AgentNav ACP"/>
     </extensions>
 
@@ -90,8 +90,8 @@
         <!-- Action contextuelle dans les éditeurs : Ctrl+Alt+L pour ajouter la sélection
              courante au chat AgentNav (style Cursor). Aussi disponible via right-click
              dans l'éditeur. -->
-        <action id="com.claudeacp.AddSelectionToChat"
-                class="com.claudeacp.AddSelectionToChatAction"
+        <action id="com.agentnav.AddSelectionToChat"
+                class="com.agentnav.AddSelectionToChatAction"
                 text="Add Selection to AgentNav Chat"
                 description="Attach the current editor selection (with file:line range) to the active AgentNav chat.">
             <keyboard-shortcut keymap="$default" first-keystroke="control alt L"/>
