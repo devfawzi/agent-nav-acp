@@ -32,6 +32,13 @@ sealed class ClaudeEvent {
     /** system:hook_started / system:hook_response (hooks user SessionStart, etc.). */
     data class Hook(val subtype: String, val hookName: String?) : ClaudeEvent()
 
+    /** system:thinking_tokens — estimation live des tokens du turn (jauge de contexte). */
+    data class ThinkingTokens(val estimatedTokens: Long, val delta: Long) : ClaudeEvent()
+
+    /** Sortie d'une commande locale exécutée par claude (event user avec content STRING,
+     *  wrappé <local-command-stdout> — ex. confirmation de set_model, /config key=value). */
+    data class LocalCommandOutput(val text: String) : ClaudeEvent()
+
     /** Autre subtype system non géré spécifiquement (inoffensif). */
     data class SystemOther(val subtype: String?) : ClaudeEvent()
 
@@ -156,6 +163,10 @@ object ClaudeStreamParser {
             "status" -> ClaudeEvent.Status(json.get("permissionMode")?.asString)
             "hook_started", "hook_response" ->
                 ClaudeEvent.Hook(subtype, json.get("hook_name")?.asString)
+            "thinking_tokens" -> ClaudeEvent.ThinkingTokens(
+                estimatedTokens = json.get("estimated_tokens")?.asLong ?: 0L,
+                delta = json.get("estimated_tokens_delta")?.asLong ?: 0L
+            )
             else -> ClaudeEvent.SystemOther(subtype)
         }
     }
@@ -189,8 +200,18 @@ object ClaudeStreamParser {
     }
 
     private fun parseUser(json: JsonObject): List<ClaudeEvent> {
-        val content = json.getAsJsonObject("message")?.getAsJsonArray("content")
-            ?: return emptyList()
+        val rawContent = json.getAsJsonObject("message")?.get("content") ?: return emptyList()
+        // content STRING = sortie de commande locale (ex. "<local-command-stdout>Set model
+        // to …</local-command-stdout>" après un set_model) — observé claude 2.1.201.
+        if (rawContent.isJsonPrimitive) {
+            val text = rawContent.asString
+                .removePrefix("<local-command-stdout>")
+                .removeSuffix("</local-command-stdout>")
+                .trim()
+            return if (text.isEmpty()) emptyList() else listOf(ClaudeEvent.LocalCommandOutput(text))
+        }
+        if (!rawContent.isJsonArray) return emptyList()
+        val content = rawContent.asJsonArray
         val events = mutableListOf<ClaudeEvent>()
         content.forEach { item ->
             if (!item.isJsonObject) return@forEach
