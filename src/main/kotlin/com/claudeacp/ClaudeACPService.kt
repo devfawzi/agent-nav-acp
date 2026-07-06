@@ -357,28 +357,6 @@ class ClaudeACPService(private val project: Project) {
         }
     }
 
-    /**
-     * Prérequis minimal : Claude Code CLI installé. Node.js/npx n'est plus requis pour
-     * Claude (on utilise le binaire `claude` direct). npx reste utile pour OpenCode via
-     * npx, mais c'est optionnel — l'user peut choisir un autre agent.
-     */
-    data class Prerequisites(
-        val claudeCliPath: String?,
-        val claudeConfigDir: String?,
-        val npxPath: String?
-    ) {
-        val allOk: Boolean get() = claudeCliPath != null
-        val missing: List<String> = buildList {
-            if (claudeCliPath == null) add("Claude Code CLI")
-        }
-    }
-
-    fun checkPrerequisites(): Prerequisites = Prerequisites(
-        claudeCliPath = AgentBinaryResolver.resolveClaudeCli(),
-        claudeConfigDir = "${System.getProperty("user.home")}/.claude".takeIf { File(it).isDirectory },
-        npxPath = AgentBinaryResolver.resolveNpx()
-    )
-
     private fun handleStdout(text: String) {
         lineBuffer.append(text)
         while (lineBuffer.contains('\n')) {

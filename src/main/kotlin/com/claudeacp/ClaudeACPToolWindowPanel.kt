@@ -206,7 +206,7 @@ class ClaudeACPToolWindowPanel(
     }
 
     private fun checkPrerequisitesAndConnect() {
-        val prereqs = acpService.checkPrerequisites()
+        val prereqs = Prerequisites.check()
         if (!prereqs.allOk) {
             onboardingPanel.update(prereqs)
             showCard("onboarding")

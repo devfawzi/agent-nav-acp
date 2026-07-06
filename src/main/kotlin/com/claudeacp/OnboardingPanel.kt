@@ -84,7 +84,7 @@ class OnboardingPanel(private val onRetry: () -> Unit) {
         return main
     }
 
-    fun update(prerequisites: ClaudeACPService.Prerequisites) {
+    fun update(prerequisites: Prerequisites) {
         stepsContainer.removeAll()
 
         if (prerequisites.claudeCliPath == null) {
