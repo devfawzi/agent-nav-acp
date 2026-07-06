@@ -121,8 +121,7 @@ class ClaudeACPToolWindowFactory : ToolWindowFactory, DumbAware {
         private val project: Project
     ) : AnAction("Inspect Claude Memory", "Show files Claude auto-loads as memory + delete entries", AllIcons.Actions.SearchWithHistory) {
         override fun actionPerformed(e: AnActionEvent) {
-            val acpService = project.getService(ClaudeACPService::class.java)
-            val paths = acpService.lastMemoryPaths
+            val paths = MemoryPathsCache.getInstance(project).paths
             if (paths.isEmpty()) {
                 // Fallback : on tente avec le dossier standard du projet courant
                 val basePath = project.basePath

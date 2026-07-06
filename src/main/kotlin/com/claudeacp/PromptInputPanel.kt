@@ -59,7 +59,6 @@ class PromptInputPanel(
 ) {
 
     private val log = thisLogger()
-    private val acpService = project.getService(ClaudeACPService::class.java)
 
     private val textArea = JTextArea(3, 0).apply {
         lineWrap = true
@@ -376,10 +375,7 @@ class PromptInputPanel(
                 description = opt.description ?: opt.id,
                 isPlugin = false,
                 checked = opt.id == currentConfig.currentModelId,
-                onActivate = {
-                    if (setModelCallback != null) setModelCallback.invoke(opt.id)
-                    else acpService.setModel(opt.id, targetSessionId = sid)
-                }
+                onActivate = { setModelCallback?.invoke(opt.id) }
             )
         }
     }
@@ -392,10 +388,7 @@ class PromptInputPanel(
                 description = opt.description ?: opt.id,
                 isPlugin = false,
                 checked = opt.id == currentConfig.currentModeId,
-                onActivate = {
-                    if (setModeCallback != null) setModeCallback.invoke(opt.id)
-                    else acpService.setMode(opt.id, targetSessionId = sid)
-                }
+                onActivate = { setModeCallback?.invoke(opt.id) }
             )
         }
     }
@@ -412,10 +405,7 @@ class PromptInputPanel(
                 description = opt.description ?: opt.id,
                 isPlugin = false,
                 checked = opt.id == effortOpt.currentValue,
-                onActivate = {
-                    if (setEffortCallback != null) setEffortCallback.invoke(opt.id)
-                    else acpService.setConfigOption(effortOpt.id, opt.id, targetSessionId = sid)
-                }
+                onActivate = { setEffortCallback?.invoke(opt.id) }
             )
         }
     }
@@ -1071,12 +1061,7 @@ class PromptInputPanel(
                     // que CE chat (pas les autres). Pas de dialog warning : c'est isolé.
                     service.setActiveProfile(profile.id)
                     updateAgentButtonLabel()
-                    if (onAgentSwitchRequested != null) {
-                        onAgentSwitchRequested.invoke(profile)
-                    } else {
-                        // Fallback legacy (ne devrait plus être atteint)
-                        acpService.switchAgent(profile)
-                    }
+                    onAgentSwitchRequested?.invoke(profile)
                 }
             }
             menu.add(item)

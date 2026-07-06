@@ -564,6 +564,10 @@ class ClaudeACPToolWindowPanel(
             ui.invokeLater { chatPanel.appendError(msg) }
         }
 
+        backend.onMemoryPaths = { paths ->
+            MemoryPathsCache.getInstance(project).paths = paths
+        }
+
         // PendingChange (diff inline + side panel) — vient de PendingChangesService project-level
         // mais filtré par sid du change (les backends taggent leur sid à l'addOrUpdate).
         pendingService.addAddedListener { change ->
