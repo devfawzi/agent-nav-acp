@@ -78,6 +78,15 @@ object ClaudeRequests {
             """"request_id":${escape(requestId)},"response":""" +
             """{"behavior":"deny","message":${escape(message ?: "Denied by user")}}}}"""
 
+    /**
+     * Renomme la session côté claude — persisté dans le .jsonl, visible dans le picker
+     * /resume du CLI. Découvert par sonde 2026-07-06 (claude 2.1.201) : le champ est
+     * `title` (avec `name`, claude répond "undefined is not an object …title.trim").
+     */
+    fun renameSession(requestId: String, title: String): String =
+        """{"type":"control_request","request_id":${escape(requestId)},""" +
+            """"request":{"subtype":"rename_session","title":${escape(title)}}}"""
+
     /** Réponse permissive aux control_request de subtype inconnu (ne pas bloquer claude). */
     fun allowOnceDecision(requestId: String): String =
         """{"type":"control_response","request_id":${escape(requestId)},"response":{"decision":"allow_once"}}"""

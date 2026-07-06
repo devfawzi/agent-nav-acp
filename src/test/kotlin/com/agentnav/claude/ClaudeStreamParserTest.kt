@@ -173,6 +173,14 @@ class ClaudeStreamParserTest {
         }
 
     @Test
+    fun `rename-session — control_response success (mécanisme du rename bidirectionnel)`() =
+        forEachVersion("rename-session") { events ->
+            val resp = events.filterIsInstance<ClaudeEvent.ControlResponse>().lastOrNull()
+                ?: fail("ControlResponse attendu")
+            assertTrue(resp.success, "rename_session doit répondre success, reçu error=${resp.error}")
+        }
+
+    @Test
     fun `resume — la session résumée retrouve le contexte`() =
         forEachVersion("resume") { events ->
             assertTrue(events.any { it is ClaudeEvent.AssistantText && it.text.contains("zebra42") },

@@ -107,6 +107,14 @@ class ClaudeRequestsTest {
     }
 
     @Test
+    fun `renameSession utilise le champ title`() {
+        assertEquals(
+            """{"type":"control_request","request_id":"rn-1","request":{"subtype":"rename_session","title":"Mon chat"}}""",
+            ClaudeRequests.renameSession("rn-1", "Mon chat")
+        )
+    }
+
+    @Test
     fun `allowOnceDecision pour control_request inconnu`() {
         assertEquals(
             """{"type":"control_response","request_id":"x-1","response":{"decision":"allow_once"}}""",

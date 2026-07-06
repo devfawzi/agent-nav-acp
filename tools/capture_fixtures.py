@@ -90,6 +90,11 @@ SCENARIOS = {
                    ("control", {"subtype": "set_permission_mode", "mode": "plan"}),
                    ("wait_control_response", 1)],
     },
+    "rename-session": {
+        "steps": [("send", "Reply with exactly: ok"), ("wait_result", 1),
+                   ("control", {"subtype": "rename_session", "title": "AgentNav fixture title"}),
+                   ("wait_control_response", 1)],
+    },
     "tool-error": {
         "steps": [("send", "Read the file /nonexistent/definitely-missing.txt and tell me its first line."),
                    ("wait_result", 1)],
