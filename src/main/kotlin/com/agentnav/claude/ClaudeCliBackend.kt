@@ -67,7 +67,10 @@ class ClaudeCliBackend(
     private val project: Project,
     private val profile: AgentProfile,
     resumeSid: String? = null,
-    private val cwdOverride: String? = null
+    private val cwdOverride: String? = null,
+    /** Avec resumeSid : `--fork-session` → nouvelle session id, historique repris, la
+     *  session d'origine reste intacte (IMPROVEMENTS #6). */
+    private val forkSession: Boolean = false
 ) : AgentBackend {
 
     private val log = thisLogger()
@@ -231,6 +234,9 @@ class ClaudeCliBackend(
             val argsForLaunch = buildList {
                 if (resumeSid != null) {
                     add("--resume"); add(resumeSid)
+                    // Fork : claude génère un NOUVEAU sid (renvoyé au system:init, le
+                    // remap preAssignedSid → sid réel existant prend le relais).
+                    if (forkSession) add("--fork-session")
                 } else {
                     add("--session-id"); add(_sessionId)
                 }

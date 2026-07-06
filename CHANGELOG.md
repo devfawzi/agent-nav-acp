@@ -2,6 +2,11 @@
 
 Toutes les évolutions notables du plugin AgentNav.
 
+## [0.9.5] — 2026-07-06
+
+### Ajouté
+- **Conversation tree** (IMPROVEMENTS #6) : `/tree` affiche l'arbre de branches de la session (graphe `parentUuid`, 🌿 aux points de divergence) + bouton **Fork session** — continue dans un nouveau tab via `--resume --fork-session`, la session d'origine reste intacte.
+
 ## [0.9.4] — 2026-07-06
 
 ### Ajouté

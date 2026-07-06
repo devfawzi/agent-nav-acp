@@ -46,7 +46,8 @@ class AgentNavToolWindowFactory : ToolWindowFactory, DumbAware {
         toolWindow: ToolWindow,
         resumeSid: String? = null,
         resumeCwd: String? = null,
-        initialTitle: String? = null
+        initialTitle: String? = null,
+        fork: Boolean = false
     ): Content {
         val n = sessionCounter.getAndIncrement()
         // Chaque chat = sa propre session backend isolée. Le sessionId est connu dès la
@@ -56,7 +57,8 @@ class AgentNavToolWindowFactory : ToolWindowFactory, DumbAware {
             project = project,
             profile = profile,
             resumeSid = resumeSid,
-            cwdOverride = resumeCwd
+            cwdOverride = resumeCwd,
+            forkSession = fork
         )
         val panel = AgentNavToolWindowPanel(project, chatSession, isFirstChat = (n == 1))
         val displayTitle = initialTitle ?: "Chat $n"
@@ -83,6 +85,14 @@ class AgentNavToolWindowFactory : ToolWindowFactory, DumbAware {
 
         panel.renameContentCallback = { newName ->
             content.displayName = newName
+        }
+
+        panel.forkSessionCallback = { sid, cwd ->
+            addNewChatContent(
+                project, toolWindow,
+                resumeSid = sid, resumeCwd = cwd,
+                initialTitle = "🌿 ${content.displayName}", fork = true
+            )
         }
 
         return content

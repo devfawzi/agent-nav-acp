@@ -22,7 +22,8 @@ class ChatSession(
     private val project: Project,
     val profile: AgentProfile,
     resumeSid: String? = null,
-    cwdOverride: String? = null
+    cwdOverride: String? = null,
+    forkSession: Boolean = false
 ) {
 
     /**
@@ -31,7 +32,8 @@ class ChatSession(
      */
     val backend: AgentBackend = when (profile.transport) {
         Transport.CLI_STREAM_JSON ->
-            ClaudeCliBackend(project, profile, resumeSid = resumeSid, cwdOverride = cwdOverride)
+            ClaudeCliBackend(project, profile, resumeSid = resumeSid,
+                cwdOverride = cwdOverride, forkSession = forkSession)
         else -> AcpSessionBackend(project, profile)
     }
 

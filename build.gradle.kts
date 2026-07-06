@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "com.agentnav"
-version = "0.9.4"
+version = "0.9.5"
 
 repositories {
     mavenCentral()
@@ -70,6 +70,13 @@ intellijPlatform {
             sinceBuild = "261"
         }
         changeNotes = """
+            <h3>0.9.5</h3>
+            <ul>
+                <li><b>Conversation tree</b> — <code>/tree</code> shows the branch tree of the
+                    current session (parentUuid graph, 🌿 divergence points) with a
+                    <b>Fork session</b> button: continue in a new tab via
+                    <code>--resume --fork-session</code>, the original stays untouched.</li>
+            </ul>
             <h3>0.9.4</h3>
             <ul>
                 <li><b>Editor quick actions</b> — right-click a selection: Ask / Explain /

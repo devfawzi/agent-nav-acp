@@ -78,20 +78,20 @@ Tres discret juste a coté de history en haut a droite en petit
 **Effort** : faible (4-5h).
 **Risque** : aucun.
 
-### 6. Conversation tree / branches
+### 6. Conversation tree / branches ✅ DONE (2026-07-06 — /tree : arbre parentUuid + fork via --fork-session)
 **État actuel** : un seul fil linéaire. Si on edit un prompt précédent, on perd l'historique d'après.
 **Proposition** : exposer l'arbre de la conv (claude stocke `parentUuid` dans les .jsonl) — sidebar collapsible avec tree view, click sur une branche = rejoue.
 **Effort** : élevé (3-5 jours). UI à concevoir, modèle de données complet à parser.
 **Risque** : peut alourdir l'UI si pas bien intégré. À évaluer si l'user en a vraiment besoin.
 c'est utile
 
-### 7. Quick actions sur la sélection éditeur
+### 7. Quick actions sur la sélection éditeur ✅ DONE (2026-07-06 — Ask/Explain/Refactor with Claude)
 **État actuel** : il faut copier-coller dans le chat.
 **Proposition** : right-click dans n'importe quel éditeur → "Ask Claude about this", "Refactor with Claude", "Explain with Claude". Pré-remplit le prompt + ouvre le tool window.
 **Effort** : faible (4h). C'est juste 3 actions IntelliJ + un peu de format.
 **Risque** : aucun.
 
-### 8. Multi-cwd / @path absolu
+### 8. Multi-cwd / @path absolu ✅ DONE (2026-07-06 — Settings → Additional directories → --add-dir)
 **État actuel** : `@file` ne propose que les fichiers du projet courant.
 **Proposition** : `@/abs/path` toujours autorisé ; et un toggle "Add directory" qui passe `--add-dir <path>` à claude pour étendre son sandbox.
 **Effort** : faible (2-3h).

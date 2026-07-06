@@ -131,6 +131,9 @@ class AgentNavToolWindowPanel(
     /** Callback set par la factory pour renommer le content (le tab) du tool window. */
     var renameContentCallback: ((String) -> Unit)? = null
 
+    /** Callback set par la factory : fork la session courante dans un nouveau tab (/tree). */
+    var forkSessionCallback: ((sid: String, cwd: String?) -> Unit)? = null
+
     /** Indique si on a déjà auto-renommé via le 1er prompt (pour ne pas écraser un rename manuel). */
     @Volatile
     private var hasAutoRenamed = false
@@ -515,6 +518,19 @@ class AgentNavToolWindowPanel(
                     .showSettingsDialog(project, AgentSettingsConfigurable::class.java)
             }
             "export" -> exportChatToMarkdown()
+            "tree" -> {
+                val treeSid = mySessionId
+                val file = treeSid?.let { SessionHistoryLoader.sessionFile(project.basePath, it) }
+                when {
+                    treeSid == null || !hasConversation() ->
+                        chatPanel.appendInfo("No conversation yet — /tree shows the branch tree of the current session.")
+                    file == null ->
+                        chatPanel.appendInfo("Session file not on disk yet — send a first prompt, then retry /tree.")
+                    else -> SessionTreeDialog(treeSid, file) {
+                        forkSessionCallback?.invoke(treeSid, project.basePath)
+                    }.show()
+                }
+            }
             else -> {
                 chatPanel.appendInfo("Unknown command: /$cmd")
             }

@@ -131,7 +131,7 @@ class PromptInputPanel(
     /** Slash commands interceptés par le plugin (ne sont PAS envoyés à claude).
      *  Note : `/config` sans args ouvre les Settings AgentNav (parité panneau TUI) ;
      *  `/config key=value` part à claude qui applique la config (réponse synthétique). */
-    private val PLUGIN_SLASH_COMMANDS = setOf("mode", "model", "effort", "skill", "skills", "mcp", "agent", "config", "export")
+    private val PLUGIN_SLASH_COMMANDS = setOf("mode", "model", "effort", "skill", "skills", "mcp", "agent", "config", "export", "tree")
 
     private val fileMentionPopup = FileMentionPopup(project, textArea) { entry ->
         replaceMentionToken(entry)
@@ -368,6 +368,11 @@ class PromptInputPanel(
             SlashCommandPopup.Entry(
                 name = "export",
                 description = "Export this conversation as Markdown",
+                isPlugin = true
+            ),
+            SlashCommandPopup.Entry(
+                name = "tree",
+                description = "Conversation tree — branches & fork this session",
                 isPlugin = true
             )
         )
