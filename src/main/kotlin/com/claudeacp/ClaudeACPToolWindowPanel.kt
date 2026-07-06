@@ -29,7 +29,6 @@ class ClaudeACPToolWindowPanel(
     @Volatile
     private var chatSession: ChatSession = initialChatSession
     private val backend get() = chatSession.backend
-    private val acpService = project.getService(ClaudeACPService::class.java)
     private val historyService = project.getService(PromptHistoryService::class.java)
     private val diffManager = project.getService(DiffViewerManager::class.java)
 

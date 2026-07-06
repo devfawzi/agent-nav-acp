@@ -70,7 +70,6 @@
                     icon="AllIcons.Actions.Lightning"/>
 
         <!-- Services -->
-        <projectService serviceImplementation="com.claudeacp.ClaudeACPService"/>
         <projectService serviceImplementation="com.claudeacp.PromptHistoryService"/>
         <projectService serviceImplementation="com.claudeacp.PendingChangesService"/>
         <projectService serviceImplementation="com.claudeacp.DiffViewerManager"/>

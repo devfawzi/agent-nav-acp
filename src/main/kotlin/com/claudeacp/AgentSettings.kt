@@ -158,7 +158,7 @@ class AgentSettings : PersistentStateComponent<AgentSettings.State> {
     fun getMcpToolsCache(): Map<String, List<String>> =
         state.mcpToolsCacheCsv.mapValues { it.value.split(",").filter { t -> t.isNotBlank() } }
 
-    /** Met à jour le cache. Appelé par ClaudeACPService au `system:init`. */
+    /** Met à jour le cache. Appelé par ClaudeCliBackend au `system:init`. */
     fun updateMcpToolsCache(toolsByServer: Map<String, List<String>>) {
         state.mcpToolsCacheCsv = toolsByServer
             .mapValues { it.value.joinToString(",") }
