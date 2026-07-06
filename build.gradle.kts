@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "com.agentnav"
-version = "0.9.2"
+version = "0.9.3"
 
 repositories {
     mavenCentral()
@@ -70,6 +70,16 @@ intellijPlatform {
             sinceBuild = "261"
         }
         changeNotes = """
+            <h3>0.9.3</h3>
+            <ul>
+                <li><b>Resume in current tab</b> with full history replay — past user/assistant
+                    exchanges from the session .jsonl are re-rendered in the chat (system
+                    wrappers, thinking and tool noise filtered out).</li>
+                <li><b>Bidirectional rename</b> — renaming a chat tab (or the auto-title from
+                    the first prompt) renames the claude session itself, visible in CLI
+                    <code>/resume</code>.</li>
+                <li>Resumed tab titles use claude's generated session summary when available.</li>
+            </ul>
             <h3>0.9.2</h3>
             <ul>
                 <li>Claude backend now runs entirely on the fixture-tested protocol parser —

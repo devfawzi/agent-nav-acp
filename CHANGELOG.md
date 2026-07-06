@@ -2,6 +2,13 @@
 
 Toutes les évolutions notables du plugin AgentNav.
 
+## [0.9.3] — 2026-07-06
+
+### Ajouté
+- **Resume dans le tab courant** : reprendre une session la charge dans le tab actif (confirmation si une conversation y est en cours), avec **replay de l'historique** — les échanges user/assistant du `.jsonl` sont ré-affichés dans le chat (wrappers système, thinking et sorties synthétiques filtrés).
+- **Rename bidirectionnel** : renommer un tab (ou l'auto-rename du 1er prompt) renomme la session côté Claude Code (`rename_session`) — visible dans `/resume` du CLI et dans le picker du plugin.
+- Le titre des tabs repris utilise le `summary` généré par claude quand il existe.
+
 ## [0.9.2] — 2026-07-06
 
 ### Changé
