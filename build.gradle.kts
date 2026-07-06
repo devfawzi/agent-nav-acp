@@ -39,6 +39,12 @@ kotlin {
     }
 }
 
+tasks.named<org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask>("runIde") {
+    // La sandbox 2026.1 crashe sous Wayland natif (NPE WLWindowPeer.reactivate au
+    // WelcomeScreen). Force XToolkit (XWayland) le temps que JetBrains fixe WLToolkit.
+    jvmArgs("-Dawt.toolkit.name=XToolkit")
+}
+
 intellijPlatform {
     pluginConfiguration {
         ideaVersion {
