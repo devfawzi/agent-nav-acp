@@ -1,0 +1,56 @@
+name: Release
+
+# Tag v* → build du zip → GitHub Release → updatePlugins.xml régénéré sur gh-pages.
+# L'IDE de l'user (custom plugin repository pointé sur le XML) propose la MAJ automatiquement.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build plugin
+        run: ./gradlew buildPlugin --no-daemon
+
+      - name: Read version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/distributions/agentnav-${{ steps.version.outputs.version }}.zip
+          generate_release_notes: true
+
+      - name: Generate updatePlugins.xml
+        run: |
+          mkdir -p site
+          cat > site/updatePlugins.xml <<EOF
+          <plugins>
+            <plugin id="com.agentnav"
+                    version="${{ steps.version.outputs.version }}"
+                    url="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/agentnav-${{ steps.version.outputs.version }}.zip">
+              <idea-version since-build="261"/>
+            </plugin>
+          </plugins>
+          EOF
+
+      - name: Publish updatePlugins.xml to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: site
+          publish_branch: gh-pages

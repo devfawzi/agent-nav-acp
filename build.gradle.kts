@@ -58,6 +58,18 @@ intellijPlatform {
             sinceBuild = "261"
         }
         changeNotes = """
+            <h3>0.9.0</h3>
+            <ul>
+                <li><b>AgentNav rework</b> — new plugin id <code>com.agentnav</code>, restructured
+                    architecture: one isolated agent process per chat tab (Claude Code CLI
+                    stream-json by default, OpenCode/ACP agents via a dedicated hub).</li>
+                <li>ACP permission prompts now show Allow/Deny cards (no more silent auto-accept).</li>
+                <li>TUI parity for slash commands: <code>/</code> popup populated from the first
+                    keystroke (persistent caches + builtins), <code>/mcp</code> lists servers
+                    instantly, <code>/config</code> opens the Settings panel.</li>
+                <li>Fixed memory paths inspector, gradle transforms cache corruption (local IDE
+                    for runIde), Wayland sandbox crash.</li>
+            </ul>
             <h3>0.1.0</h3>
             <ul>
                 <li>Session resume from <code>~/.claude/projects/</code> with searchable picker
