@@ -2,6 +2,16 @@
 
 Toutes les évolutions notables du plugin AgentNav.
 
+## [0.9.4] — 2026-07-06
+
+### Ajouté
+- **Quick actions éditeur** (IMPROVEMENTS #7) : clic droit sur une sélection → Ask / Explain / Refactor with Claude (code attaché + prompt pré-rempli).
+- **`--add-dir`** (IMPROVEMENTS #8) : Settings → Additional directories étend le sandbox de claude hors projet (mentions `@/abs/path`).
+- `/export` dans le popup slash.
+
+### Corrigé
+- Ctrl+Alt+L (Add selection to chat) cassé depuis le rename v0.9.0 (id de tool window obsolète).
+
 ## [0.9.3] — 2026-07-06
 
 ### Ajouté

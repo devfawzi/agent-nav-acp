@@ -70,6 +70,15 @@ intellijPlatform {
             sinceBuild = "261"
         }
         changeNotes = """
+            <h3>0.9.4</h3>
+            <ul>
+                <li><b>Editor quick actions</b> — right-click a selection: Ask / Explain /
+                    Refactor with Claude (attaches the code and prefills a targeted prompt).</li>
+                <li><b>--add-dir support</b> — Settings → Additional directories extends
+                    claude's sandbox beyond the project (enables <code>@/abs/path</code> mentions).</li>
+                <li><code>/export</code> slash command (Markdown export).</li>
+                <li>Fix: Ctrl+Alt+L (Add selection to chat) was broken since the 0.9.0 rename.</li>
+            </ul>
             <h3>0.9.3</h3>
             <ul>
                 <li><b>Resume in current tab</b> with full history replay — past user/assistant
