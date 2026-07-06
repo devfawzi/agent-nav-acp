@@ -63,7 +63,16 @@ Le contrat `AgentBackend` ne change pas : l'UI ne distingue pas Claude d'un agen
 - **Crash du process hub** : tous les backends rattachés reçoivent `onError` + état `ERROR` ; le hub respawn à la prochaine demande de session. Pas de reconnexion silencieuse côté ACP (les sessions ACP ne sont pas résumables comme claude).
 - Un agent ACP = un `AgentProfile` (command, args, env, transport=ACP). OpenCode fourni en builtin ; l'user en déclare d'autres via Settings sans toucher au code.
 
-## 3. Claude Code irréprochable
+## 3. Gestion de sessions & resume (exigence user renforcée, 2026-07-06)
+
+- **1 tab = 1 process** : chaque nouveau tab de chat spawn son propre process claude (ou sa propre session ACP OpenCode). Aucun état partagé entre tabs. C'était déjà le design du 18/05 mais jugé peu fiable par l'user → le claim du sessionId (placeholder `pending-*` → sid réel) et l'isolation stricte font l'objet de scénarios dédiés dans la checklist §7.
+- **Resume dans le tab courant** : l'action Resume, lancée depuis un tab, charge la session choisie **dans ce tab** (arrêt propre du process courant, respawn `--resume <sid>` avec le cwd d'origine de la session) — pas d'ouverture d'un nouveau tab.
+- **Replay de l'historique** : au resume, le `.jsonl` de la session est parsé et la conversation re-rendue dans le ChatPanel (messages user/assistant, wrappers système strippés, tool calls résumés) avant de reprendre la conv.
+- **Picker global cross-projets** : le ResumeSessionDialog gagne deux modes — « Ce projet » (défaut) et « Tous les projets » (scan `~/.claude/projects/*/*.jsonl`), équivalent de la liste complète Ctrl+A du CLI. Colonnes : titre/summary, projet (cwd), premier/dernier message, dates. Reprendre une session d'un autre projet spawn claude avec le cwd de cette session (`cwdOverride` existant).
+- **Rename bidirectionnel** : renommer un tab dans le plugin renomme la session côté Claude Code (visible ensuite dans le picker `/resume` du CLI). Mécanisme exact côté claude 2.1.201 **à confirmer via le harness** (candidats : control_request dédié, slash command, event `summary`/title du `.jsonl`). Fallback si claude n'expose aucun rename : écrire le titre dans le `.jsonl` si le format le permet, sinon mapping nom↔sid persisté côté plugin et affiché dans nos pickers (limitation documentée : le picker CLI ne verrait pas le nom).
+- **OpenCode/ACP** : mêmes principes — 1 session par tab ; resume via `session/load` si le serveur ACP l'expose, sinon action désactivée proprement côté UI.
+
+## 4. Claude Code irréprochable
 
 ### Parser extrait et testable
 
@@ -73,7 +82,7 @@ Le contrat `AgentBackend` ne change pas : l'UI ne distingue pas Claude d'un agen
 ### Harness de capture (le « ouvrir un claude et tester des prompts » industrialisé)
 
 - `tools/capture-fixtures.sh` : spawn le vrai `claude` en stream-json bidirectionnel dans un cwd jetable, joue des scénarios scriptés, dump le NDJSON brut dans `src/test/resources/fixtures/claude/<version>/<scenario>.ndjson`. Modèle le moins cher (haiku) et prompts minimaux pour ne pas manger le quota. Sanitisation des paths (`$HOME` → placeholder).
-- Scénarios (~15) : texte simple · thinking · Write · Edit · Bash avec `can_use_tool` (allow, deny, allow-always avec `updatedPermissions`) · plan mode + ExitPlanMode · interrupt · resume `--resume <sid>` · `set_model` · `set_permission_mode` · tool_result `is_error` · MCP tool call · sub-agent (Task) · AskUserQuestion · TodoWrite · usage/cost (`result`).
+- Scénarios (~16) : texte simple · thinking · Write · Edit · Bash avec `can_use_tool` (allow, deny, allow-always avec `updatedPermissions`) · plan mode + ExitPlanMode · interrupt · resume `--resume <sid>` · `set_model` · `set_permission_mode` · tool_result `is_error` · MCP tool call · sub-agent (Task) · AskUserQuestion · TodoWrite · usage/cost (`result`) · **investigation rename de session** (cf §3 — tester les candidats et documenter le mécanisme retenu).
 - **Revalidation 2.1.201** : le protocole a été validé sur 2.1.123 ; la première capture sert d'audit des schémas actuels (control_request, `can_use_tool`, `updatedInput`).
 - À chaque montée de version claude : re-capture dans un nouveau dossier `<version>/`, diff avec la version précédente → le drift de protocole est visible avant d'exploser chez les users.
 
@@ -86,7 +95,7 @@ Le contrat `AgentBackend` ne change pas : l'UI ne distingue pas Claude d'un agen
 
 Événement/subtype inconnu → `ClaudeEvent.Unknown` → log structuré (PluginLogService, catégorie `protocol`) + rendu dégradé dans le chat. Jamais de crash, jamais de silence.
 
-## 4. Distribution & mises à jour automatiques
+## 5. Distribution & mises à jour automatiques
 
 - **`ci.yml`** : sur push/PR → `gradlew build` (compile + tests + `verifyPlugin`).
 - **`release.yml`** : sur tag `v*` → `buildPlugin` → GitHub Release avec le zip en asset → régénère `updatePlugins.xml` sur la branche `gh-pages` :
@@ -102,7 +111,7 @@ Le contrat `AgentBackend` ne change pas : l'UI ne distingue pas Claude d'un agen
 - Versioning semver, `CHANGELOG.md` (format Keep a Changelog), `patchPluginXml` injecte les changeNotes de la version courante.
 - Phase 2 (hors périmètre) : Marketplace JetBrains — même pipeline + `publishPlugin` avec token, channels stable/eap.
 
-## 5. Gestion d'erreurs (récap transversal)
+## 6. Gestion d'erreurs (récap transversal)
 
 | Source | Comportement |
 |---|---|
@@ -112,12 +121,13 @@ Le contrat `AgentBackend` ne change pas : l'UI ne distingue pas Claude d'un agen
 | Process hub ACP mort | `onError` + ERROR sur toutes les sessions, respawn lazy |
 | control_response error | rollback de l'update UI optimiste (mécanisme existant conservé) |
 
-## 6. Validation finale (gate v1.0.0)
+## 7. Validation finale (gate v1.0.0)
 
 1. CI verte (tests parser + golden requests).
-2. Checklist smoke en sandbox `runIde` : multi-tabs isolés (Claude ×2 + OpenCode ×1 en parallèle) · diffViewer sur **toute** modif Write/Edit/MultiEdit (bug constaté le 2026-05-18) · permission cards allow/deny/always · resume picker · slash commands (`/mode` `/model` `/effort` `/skill` `/mcp` `/agent`) · export markdown · attachments/images/@mentions · stop sans perte de session.
-3. Les 3 « TO TEST » d'IMPROVEMENTS.md : #4 reconnect auto (kill -9 pendant un turn), #31 cost cap hebdo, #32 sub-agents UI.
-4. Tag `v1.0.0` uniquement quand tout passe.
+2. Checklist smoke en sandbox `runIde` : multi-tabs isolés (Claude ×2 + OpenCode ×1 en parallèle, prompts croisés sans cross-talk) · diffViewer sur **toute** modif Write/Edit/MultiEdit (bug constaté le 2026-05-18) · permission cards allow/deny/always · slash commands (`/mode` `/model` `/effort` `/skill` `/mcp` `/agent`) · export markdown · attachments/images/@mentions · stop sans perte de session.
+3. Checklist sessions (§3) : resume chargé **dans le tab courant** avec replay de l'historique · picker « Tous les projets » liste les sessions hors scope et les reprend avec le bon cwd · rename de tab visible dans le picker `/resume` du CLI (ou fallback documenté) · nouveau tab = nouveau process vérifié (`ps` : 1 claude par tab).
+4. Les 3 « TO TEST » d'IMPROVEMENTS.md : #4 reconnect auto (kill -9 pendant un turn), #31 cost cap hebdo, #32 sub-agents UI.
+5. Tag `v1.0.0` uniquement quand tout passe.
 
 ## Hors périmètre
 
@@ -127,6 +137,7 @@ Marketplace JetBrains (phase 2) · conversation tree (#6) · quick actions édit
 
 1. **Étape 0** — snapshot sandbox → `pre-rework-snapshot`, branche `rework/agentnav`.
 2. **Big bang structure** — rename AgentNav + packages + module `acp/` + suppression `ClaudeACPService` + Claude par défaut + plugin.xml. Gate : build vert + smoke sandbox rapide.
-3. **Protocole** — extraction `ClaudeStreamParser`/`ClaudeRequests`, harness de capture, fixtures 2.1.201, tests JUnit.
-4. **Distribution** — CI, release pipeline, `updatePlugins.xml`, release `v0.9.0` de rodage installée sur l'IDE réel de l'user.
-5. **Validation** — checklist §6 → `v1.0.0`.
+3. **Protocole** — extraction `ClaudeStreamParser`/`ClaudeRequests`, harness de capture, fixtures 2.1.201, tests JUnit, investigation rename de session.
+4. **Sessions** — resume dans le tab courant + replay historique, picker cross-projets, rename bidirectionnel (mécanisme confirmé à l'étape 3).
+5. **Distribution** — CI, release pipeline, `updatePlugins.xml`, release `v0.9.0` de rodage installée sur l'IDE réel de l'user.
+6. **Validation** — checklist §7 → `v1.0.0`.
