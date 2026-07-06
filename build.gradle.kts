@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "com.agentnav"
-version = "0.9.1"
+version = "0.9.2"
 
 repositories {
     mavenCentral()
@@ -70,6 +70,13 @@ intellijPlatform {
             sinceBuild = "261"
         }
         changeNotes = """
+            <h3>0.9.2</h3>
+            <ul>
+                <li>Claude backend now runs entirely on the fixture-tested protocol parser —
+                    no more inline JSON handling (−400 lines), every event path covered by tests.</li>
+                <li><code>/context</code>, <code>/usage</code> and other builtin outputs render
+                    as distinct "System output" blocks (they are not model replies).</li>
+            </ul>
             <h3>0.9.1</h3>
             <ul>
                 <li>Stream-json protocol now validated against real claude 2.1.201 captures

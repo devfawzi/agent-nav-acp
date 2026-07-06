@@ -2,6 +2,12 @@
 
 Toutes les évolutions notables du plugin AgentNav.
 
+## [0.9.2] — 2026-07-06
+
+### Changé
+- Le backend Claude tourne entièrement sur le parser testé par fixtures (`ClaudeStreamParser` → `dispatchEvent`) — plus aucun parsing JSON inline (−400 lignes), chaque chemin d'événement couvert par les tests.
+- Les sorties des slash builtin (`/context`, `/usage`…) s'affichent comme blocs « System output » distincts des réponses du modèle.
+
 ## [0.9.1] — 2026-07-06
 
 ### Ajouté
