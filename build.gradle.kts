@@ -65,6 +65,13 @@ intellijPlatform {
     // d'exécution (localIdePath) et inutile pour nos settings. Désactivé (pattern courant).
     buildSearchableOptions = false
 
+    // JetBrains Marketplace (phase 2) : `./gradlew publishPlugin` avec PUBLISH_TOKEN.
+    // La 1ère soumission d'un plugin se fait manuellement sur plugins.jetbrains.com ;
+    // ensuite la CI publie chaque tag automatiquement (cf release.yml).
+    publishing {
+        token = providers.environmentVariable("PUBLISH_TOKEN")
+    }
+
     pluginConfiguration {
         ideaVersion {
             sinceBuild = "261"

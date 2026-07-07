@@ -54,3 +54,15 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: site
           publish_branch: gh-pages
+
+      # Phase 2 : s'active dès que le secret JETBRAINS_PUBLISH_TOKEN existe (compte vendor
+      # + 1ère soumission manuelle faits). Sinon skip silencieux — le custom repo suffit.
+      - name: Publish to JetBrains Marketplace
+        env:
+          PUBLISH_TOKEN: ${{ secrets.JETBRAINS_PUBLISH_TOKEN }}
+        run: |
+          if [ -n "$PUBLISH_TOKEN" ]; then
+            ./gradlew publishPlugin --no-daemon
+          else
+            echo "JETBRAINS_PUBLISH_TOKEN absent — Marketplace publish skipped."
+          fi
