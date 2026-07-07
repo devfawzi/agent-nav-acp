@@ -29,13 +29,22 @@ class AgentNavToolWindowFactory : ToolWindowFactory, DumbAware {
         DiffPaletteService.getInstance().restoreOnStartup()
 
         addNewChatContent(project, toolWindow)
+        // 4 boutons max pour que la roue dentée Settings reste TOUJOURS visible (au-delà,
+        // l'IDE relègue les actions dans le menu ⋮ où vivent déjà move/resize). Les actions
+        // rares (memory, logs) partent dans un sous-menu dédié.
+        val moreGroup = com.intellij.openapi.actionSystem.DefaultActionGroup(
+            "More AgentNav Actions", true
+        ).apply {
+            templatePresentation.icon = AllIcons.Actions.MoreHorizontal
+            add(MemoryInspectorAction(project))
+            add(ShowLogsAction(project))
+            add(RenameChatAction(toolWindow))
+        }
         toolWindow.setTitleActions(listOf(
             NewChatAction(project, toolWindow),
             ResumeChatAction(project, toolWindow),
-            RenameChatAction(toolWindow),
-            MemoryInspectorAction(project),
-            ShowLogsAction(project),
-            SettingsAction(project)
+            SettingsAction(project),
+            moreGroup
         ))
     }
 

@@ -44,6 +44,9 @@ jobs:
                     version="${{ steps.version.outputs.version }}"
                     url="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/agentnav-${{ steps.version.outputs.version }}.zip">
               <idea-version since-build="261"/>
+              <name>AgentNav</name>
+              <vendor>DevFawzi</vendor>
+              <description><![CDATA[Claude Code and ACP agents (OpenCode) inside JetBrains IDEs — isolated chat tabs, native diff review, session resume/fork, slash commands.]]></description>
             </plugin>
           </plugins>
           EOF
