@@ -1,7 +1,10 @@
 <plugins>
   <plugin id="com.agentnav"
-          version="0.9.6"
-          url="https://github.com/devfawzi/agent-nav-acp/releases/download/v0.9.6/agentnav-0.9.6.zip">
+          version="0.9.7"
+          url="https://github.com/devfawzi/agent-nav-acp/releases/download/v0.9.7/agentnav-0.9.7.zip">
     <idea-version since-build="261"/>
+    <name>AgentNav</name>
+    <vendor>DevFawzi</vendor>
+    <description><![CDATA[Claude Code and ACP agents (OpenCode) inside JetBrains IDEs — isolated chat tabs, native diff review, session resume/fork, slash commands.]]></description>
   </plugin>
 </plugins>
