@@ -1,0 +1,7 @@
+<plugins>
+  <plugin id="com.agentnav"
+          version="0.9.6"
+          url="https://github.com/devfawzi/agent-nav-acp/releases/download/v0.9.6/agentnav-0.9.6.zip">
+    <idea-version since-build="261"/>
+  </plugin>
+</plugins>
